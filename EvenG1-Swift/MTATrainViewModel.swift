@@ -1,7 +1,7 @@
+import Combine
 import CoreLocation
 import EvenG1Core
 import Foundation
-import Combine
 
 @MainActor
 final class MTATrainViewModel: ObservableObject {
@@ -10,38 +10,71 @@ final class MTATrainViewModel: ObservableObject {
         case autoTimer
         case doubleTapGesture
         case headTiltGesture
+        case edgeBoundary
     }
 
     @Published private(set) var isRefreshing = false
-    @Published private(set) var statusTitle = "No train lookup yet"
-    @Published private(set) var statusDetail = "Tap Refresh to fetch the nearest MTA arrival."
-    @Published private(set) var lastResult: MTANextTrainResult?
+    @Published private(set) var nearestStationName = "No train lookup yet"
+    @Published private(set) var statusDetail = "Tap Refresh to fetch nearest MTA arrivals."
+    @Published private(set) var upcomingTrains: [MTANextTrainResult] = []
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastUpdatedAt: Date?
     @Published private(set) var autoRefreshEnabled = false
+    @Published private(set) var topAlertSummary: String?
+    @Published private(set) var additionalAlertCount = 0
+    @Published private(set) var alertsUnavailable = false
+
+    @Published private(set) var selectedStation: MTAStationSelection?
+    @Published private(set) var visualPageIndexText = "Page 0/0"
+    @Published private(set) var bitmapDeliveryStatus = "Bitmap idle"
+    @Published private(set) var lockStatusText = "Auto-nearest"
+    @Published private(set) var currentStationPreferenceMode: MTADirectionPreferenceMode = .both
+    @Published private(set) var savedDirectionPreferences: [MTAStationDirectionPreference] = []
+    @Published private(set) var lockedStation: MTAManualStationLock?
 
     private let locationProvider: LocationProviding
     private let transitService: MTANextTrainService
+    private let directionPreferencesStore: MTAStationDirectionPreferencesStore
+    private let stationLockStore: MTAManualStationLockStore
+    private let bitmapRenderer = MTABitmapRenderer()
     private weak var bluetoothManager: G1BluetoothManager?
 
     private var autoRefreshTask: Task<Void, Never>?
     private var isDisplayTabActive = false
     private var lastTiltRefreshAt: Date?
-    private let tiltRefreshDebounceSeconds: TimeInterval = 2.0
+    private var lastEdgeRefreshAt: Date?
+    private var currentPages: [MTAVisualPage] = []
+    private var latestAlerts: [MTAServiceAlert] = []
+    private var lastKnownUserCoordinate: CLLocationCoordinate2D?
+    private var cancellables = Set<AnyCancellable>()
 
-    init(locationProvider: LocationProviding, transitService: MTANextTrainService) {
+    private let tiltRefreshDebounceSeconds: TimeInterval = 2.0
+    private let edgeRefreshCooldownSeconds: TimeInterval = 2.0
+    private let refreshIntervalSeconds: UInt64 = 30
+    private let maxAlertSnippetLength = 56
+    private let maxGlassesPayloadLength = 120
+
+    init(locationProvider: LocationProviding,
+         transitService: MTANextTrainService,
+         directionPreferencesStore: MTAStationDirectionPreferencesStore,
+         stationLockStore: MTAManualStationLockStore) {
         self.locationProvider = locationProvider
         self.transitService = transitService
+        self.directionPreferencesStore = directionPreferencesStore
+        self.stationLockStore = stationLockStore
+
+        savedDirectionPreferences = directionPreferencesStore.preferences
+        lockedStation = stationLockStore.lockedStation
+        syncLockStatusText()
+        bindStores()
     }
 
     convenience init() {
         self.init(
             locationProvider: CurrentLocationProvider(),
-            transitService: MTANextTrainService(
-                apiKeyProvider: {
-                    Bundle.main.infoDictionary?["MTA_API_KEY"] as? String
-                }
-            )
+            transitService: MTANextTrainService(),
+            directionPreferencesStore: MTAStationDirectionPreferencesStore(),
+            stationLockStore: MTAManualStationLockStore()
         )
     }
 
@@ -59,6 +92,45 @@ final class MTATrainViewModel: ObservableObject {
         updateAutoRefreshTask()
     }
 
+    func lockToNearestStation() {
+        guard let selectedStation else { return }
+        stationLockStore.setLock(station: selectedStation)
+    }
+
+    func lockToStation(_ station: MTAStationSelection) {
+        stationLockStore.setLock(station: station)
+    }
+
+    func clearManualLock() {
+        stationLockStore.clearLock()
+    }
+
+    func setCurrentStationPreferenceMode(_ mode: MTADirectionPreferenceMode) async {
+        guard let selectedStation else {
+            return
+        }
+        directionPreferencesStore.setPreferenceMode(mode, for: selectedStation)
+        currentStationPreferenceMode = directionPreferencesStore.preferenceMode(for: selectedStation)
+        rebuildVisualPages(resetToFirst: true)
+        await sendCurrentPageToGlassesIfConnected()
+    }
+
+    func setPreferenceMode(_ mode: MTADirectionPreferenceMode, for station: MTAStationSelection) {
+        directionPreferencesStore.setPreferenceMode(mode, for: station)
+        if selectedStation?.id == station.id {
+            currentStationPreferenceMode = directionPreferencesStore.preferenceMode(for: station)
+            rebuildVisualPages(resetToFirst: true)
+        }
+    }
+
+    func removePreference(id: UUID) {
+        directionPreferencesStore.removePreference(id: id)
+    }
+
+    func currentUserCoordinate() -> CLLocationCoordinate2D? {
+        lastKnownUserCoordinate
+    }
+
     func refreshNow(trigger: RefreshTrigger) async {
         if isRefreshing {
             return
@@ -66,30 +138,75 @@ final class MTATrainViewModel: ObservableObject {
 
         isRefreshing = true
         errorMessage = nil
-
         defer {
             isRefreshing = false
         }
 
         do {
+            let now = Date()
             let coordinate = try await locationProvider.requestOneShotLocation()
-            let result = try await transitService.fetchNextTrain(near: coordinate, now: Date())
+            lastKnownUserCoordinate = coordinate
 
-            lastResult = result
-            lastUpdatedAt = Date()
-            statusTitle = "\(result.routeID) \(result.direction) in \(result.minutesAway)m"
-            statusDetail = "\(result.stationName)"
+            let query = currentTransitQuery()
+            let snapshot = try await transitService.fetchTransitSnapshot(near: coordinate, now: now, query: query)
+            upcomingTrains = snapshot.upcomingTrains
+            latestAlerts = snapshot.alerts
+            lastUpdatedAt = now
+            applyAlerts(snapshot.alerts, unavailable: snapshot.alertsFetchFailed)
 
-            sendResultToGlassesIfConnected(result)
+            if let selected = snapshot.selectedStation {
+                selectedStation = MTAStationSelection(selectedStation: selected)
+            } else if let first = snapshot.upcomingTrains.first {
+                selectedStation = MTAStationSelection(
+                    stationID: first.stationID,
+                    stationName: first.stationName,
+                    latitude: coordinate.latitude,
+                    longitude: coordinate.longitude,
+                    distanceMeters: first.distanceMeters
+                )
+            } else {
+                selectedStation = nil
+            }
+
+            if snapshot.usedFallbackFromPreferredStation, stationLockStore.lockedStation != nil {
+                stationLockStore.clearLock()
+                statusDetail = "Locked station had no arrivals. Returned to nearest station."
+            } else {
+                statusDetail = "Found \(snapshot.upcomingTrains.count) arrivals in next 30 minutes."
+            }
+
+            nearestStationName = selectedStation?.stationName ?? "No trains found"
+            syncCurrentStationPreferenceMode()
+            rebuildVisualPages(resetToFirst: true)
+            await sendCurrentPageToGlassesIfConnected()
         } catch {
+            // Disabling auto-refresh or leaving the tab cancels the task. That
+            // lifecycle event should not replace valid results with an error.
+            if Task.isCancelled || error is CancellationError {
+                return
+            }
+
             let message = userFacingMessage(for: error)
             errorMessage = message
-            statusTitle = "MTA lookup failed"
-            statusDetail = message
+
+            if upcomingTrains.isEmpty {
+                nearestStationName = "MTA lookup failed"
+                statusDetail = message
+                topAlertSummary = nil
+                additionalAlertCount = 0
+                alertsUnavailable = false
+                selectedStation = nil
+                currentPages = []
+                latestAlerts = []
+                visualPageIndexText = "Page 0/0"
+                bitmapDeliveryStatus = "Bitmap idle"
+            } else {
+                // Preserve the last good snapshot during transient failures.
+                statusDetail = "\(message) Showing the previous results."
+            }
 
             if trigger == .manualButton {
-                let fallbackText = "MTA error: \(message)"
-                sendTextToGlassesIfConnected(fallbackText)
+                sendTextToGlassesIfConnected("MTA error: \(message)")
             }
         }
     }
@@ -111,9 +228,164 @@ final class MTATrainViewModel: ObservableObject {
             await refreshNow(trigger: .headTiltGesture)
         case .headDown:
             bluetoothManager?.clearDisplay()
+        case .swipeForward:
+            await paginate(delta: 1)
+        case .swipeBackward:
+            await paginate(delta: -1)
         default:
             return
         }
+    }
+
+    private func paginate(delta: Int) async {
+        guard !currentPages.isEmpty else {
+            return
+        }
+
+        let target = currentPageIndex + delta
+        if currentPages.indices.contains(target) {
+            currentPageIndex = target
+            updatePageStatus()
+            await sendCurrentPageToGlassesIfConnected()
+            return
+        }
+
+        let now = Date()
+        if let lastEdgeRefreshAt, now.timeIntervalSince(lastEdgeRefreshAt) < edgeRefreshCooldownSeconds {
+            return
+        }
+
+        lastEdgeRefreshAt = now
+        await refreshNow(trigger: .edgeBoundary)
+    }
+
+    private var currentPageIndex: Int = 0
+
+    private func rebuildVisualPages(resetToFirst: Bool) {
+        guard let selectedStation else {
+            currentPages = []
+            currentPageIndex = 0
+            updatePageStatus()
+            return
+        }
+
+        currentPages = MTAVisualBoardBuilder.buildPages(
+            station: selectedStation,
+            userCoordinate: lastKnownUserCoordinate,
+            trains: upcomingTrains,
+            alerts: latestAlerts,
+            directionMode: currentStationPreferenceMode
+        )
+
+        if resetToFirst || currentPageIndex >= currentPages.count {
+            currentPageIndex = 0
+        }
+        updatePageStatus()
+    }
+
+    private func updatePageStatus() {
+        let total = currentPages.count
+        if total == 0 {
+            visualPageIndexText = "Page 0/0"
+            return
+        }
+        visualPageIndexText = "Page \(currentPageIndex + 1)/\(total)"
+    }
+
+    private func sendCurrentPageToGlassesIfConnected() async {
+        guard bluetoothManager?.connectionState == .fullyConnected else {
+            bitmapDeliveryStatus = "Results shown in app (glasses disconnected)"
+            return
+        }
+
+        guard currentPages.indices.contains(currentPageIndex) else {
+            bitmapDeliveryStatus = "No page to render"
+            return
+        }
+
+        let page = currentPages[currentPageIndex]
+        do {
+            let frame = try bitmapRenderer.render(page: page)
+            let sent = await bluetoothManager?.sendBitmap(frame) ?? false
+            if sent {
+                bitmapDeliveryStatus = "Bitmap \(currentPageIndex + 1)/\(currentPages.count)"
+                return
+            }
+        } catch {
+            // Fall through to text fallback.
+        }
+
+        bitmapDeliveryStatus = "Bitmap failed, used text fallback"
+        sendTextFallbackForCurrentPage()
+    }
+
+    private func sendTextFallbackForCurrentPage() {
+        guard currentPages.indices.contains(currentPageIndex) else {
+            sendTextToGlassesIfConnected("MTA: No visual page available.")
+            return
+        }
+
+        let page = currentPages[currentPageIndex]
+        var parts: [String] = [
+            page.title,
+            "\(currentPageIndex + 1)/\(max(1, currentPages.count))"
+        ]
+        let rowSummary = page.rows.prefix(3).map { "\($0.routeID) \($0.minutesAway)m" }.joined(separator: ", ")
+        if !rowSummary.isEmpty {
+            parts.append(rowSummary)
+        }
+        if let topAlertSummary {
+            parts.append("Alert: \(truncated(topAlertSummary, maxLength: maxAlertSnippetLength))")
+        }
+
+        sendTextToGlassesIfConnected(truncated(parts.joined(separator: " | "), maxLength: maxGlassesPayloadLength))
+    }
+
+    private func bindStores() {
+        directionPreferencesStore.$preferences
+            .sink { [weak self] values in
+                guard let self else { return }
+                self.savedDirectionPreferences = values.sorted(by: { $0.updatedAt > $1.updatedAt })
+                self.syncCurrentStationPreferenceMode()
+            }
+            .store(in: &cancellables)
+
+        stationLockStore.$lockedStation
+            .sink { [weak self] lock in
+                guard let self else { return }
+                self.lockedStation = lock
+                self.syncLockStatusText()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func syncLockStatusText() {
+        if let lockedStation {
+            lockStatusText = "Locked: \(lockedStation.stationName)"
+        } else {
+            lockStatusText = "Auto-nearest"
+        }
+    }
+
+    private func syncCurrentStationPreferenceMode() {
+        guard let selectedStation else {
+            currentStationPreferenceMode = .both
+            return
+        }
+        currentStationPreferenceMode = directionPreferencesStore.preferenceMode(for: selectedStation)
+    }
+
+    private func currentTransitQuery() -> MTATransitQuery {
+        if let lockedStation = stationLockStore.lockedStation {
+            return MTATransitQuery(
+                horizonMinutes: 30,
+                preferredStationID: lockedStation.stationID,
+                preferredStationName: lockedStation.stationName,
+                allowFallbackFromPreferredStation: true
+            )
+        }
+
+        return MTATransitQuery(horizonMinutes: 30)
     }
 
     private func updateAutoRefreshTask() {
@@ -128,23 +400,55 @@ final class MTATrainViewModel: ObservableObject {
             guard let self else { return }
             while !Task.isCancelled {
                 await self.refreshNow(trigger: .autoTimer)
-                try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+                do {
+                    try await Task.sleep(for: .seconds(Int64(clamping: refreshIntervalSeconds)))
+                } catch {
+                    break
+                }
             }
         }
     }
 
-    private func sendResultToGlassesIfConnected(_ result: MTANextTrainResult) {
-        let shortDirection: String
-        switch result.direction {
-        case "Northbound": shortDirection = "NB"
-        case "Southbound": shortDirection = "SB"
-        case "Eastbound": shortDirection = "EB"
-        case "Westbound": shortDirection = "WB"
-        default: shortDirection = "?"
+    private func applyAlerts(_ alerts: [MTAServiceAlert], unavailable: Bool) {
+        alertsUnavailable = unavailable
+
+        guard let first = alerts.first else {
+            topAlertSummary = nil
+            additionalAlertCount = 0
+            return
         }
 
-        let text = "MTA \(result.routeID) \(shortDirection) \(result.minutesAway)m \(result.stationName)"
-        sendTextToGlassesIfConnected(text)
+        topAlertSummary = summarizeAlert(first)
+        additionalAlertCount = max(0, alerts.count - 1)
+    }
+
+    private func summarizeAlert(_ alert: MTAServiceAlert) -> String {
+        let header = alert.header.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !header.isEmpty {
+            return "\(alert.effect) - \(header)"
+        }
+
+        if let description = alert.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+            return "\(alert.effect) - \(description)"
+        }
+
+        return alert.effect
+    }
+
+    private func truncated(_ value: String, maxLength: Int) -> String {
+        guard maxLength > 0 else {
+            return ""
+        }
+
+        if value.count <= maxLength {
+            return value
+        }
+
+        if maxLength <= 3 {
+            return String(value.prefix(maxLength))
+        }
+
+        return String(value.prefix(maxLength - 3)) + "..."
     }
 
     private func sendTextToGlassesIfConnected(_ text: String) {
@@ -173,12 +477,10 @@ final class MTATrainViewModel: ObservableObject {
 
         if let transitError = error as? MTANextTrainError {
             switch transitError {
-            case .missingAPIKey:
-                return "Missing MTA API key. Set MTA_API_KEY in build settings."
             case .stationDataUnavailable:
                 return "Could not load station metadata from MTA open data."
             case .noUpcomingArrival:
-                return "No upcoming arrival found near your closest station."
+                return "No upcoming arrivals in the next 30 minutes."
             case .networkFailure(let details):
                 return "Realtime feed request failed: \(details)"
             }

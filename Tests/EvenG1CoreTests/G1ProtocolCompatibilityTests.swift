@@ -2,6 +2,11 @@ import XCTest
 @testable import EvenG1Core
 
 final class G1ProtocolCompatibilityTests: XCTestCase {
+    func testAckRoutingIncludesExitAndSilentModeCommands() {
+        XCTAssertTrue(G1BluetoothManager.routesAck(for: G1Command.EXIT_ALL.rawValue))
+        XCTAssertTrue(G1BluetoothManager.routesAck(for: G1Command.SILENT_MODE.rawValue))
+    }
+
     func testSingleTapFromDirectDeviceEvent() {
         let parser = G1FrameParser()
         parser.protocolMode = .auto
@@ -80,6 +85,14 @@ final class G1ProtocolCompatibilityTests: XCTestCase {
         XCTAssertTrue(G1BluetoothManager.prefersExtendedHeartbeat(for: .auto))
         XCTAssertTrue(G1BluetoothManager.prefersExtendedHeartbeat(for: .official))
         XCTAssertFalse(G1BluetoothManager.prefersExtendedHeartbeat(for: .legacy))
+    }
+
+    func testWriteLengthMustFitNegotiatedMaximum() {
+        XCTAssertTrue(G1BluetoothManager.isValidWriteLength(200, maximumWriteLength: 244))
+        XCTAssertTrue(G1BluetoothManager.isValidWriteLength(20, maximumWriteLength: 20))
+        XCTAssertFalse(G1BluetoothManager.isValidWriteLength(21, maximumWriteLength: 20))
+        XCTAssertFalse(G1BluetoothManager.isValidWriteLength(0, maximumWriteLength: 20))
+        XCTAssertFalse(G1BluetoothManager.isValidWriteLength(1, maximumWriteLength: 0))
     }
 
     func testTextModeDefaultsToAwaitAck() {

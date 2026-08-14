@@ -1,7 +1,8 @@
 import Foundation
+import SwiftProtobuf
 
-/// Minimal GTFS-Realtime message subset used by the MTA next-train pipeline.
-/// This mirrors fields from the official GTFS-Realtime protobuf definitions.
+/// Domain-facing GTFS-Realtime subset used by the MTA transit pipeline.
+/// Decoding is backed by SwiftProtobuf message types in GTFSProto.pb.swift.
 public struct TransitRealtime_FeedMessage: Sendable {
     public var entity: [TransitRealtime_FeedEntity]
 
@@ -10,17 +11,25 @@ public struct TransitRealtime_FeedMessage: Sendable {
     }
 
     public static func decode(from data: Data) throws -> TransitRealtime_FeedMessage {
-        try TransitRealtimeBinaryDecoder.decodeFeedMessage(from: data)
+        let proto = try GTFSProto_FeedMessage(serializedBytes: data)
+        let entities = proto.entity.map(TransitRealtime_FeedEntity.init(proto:))
+        return TransitRealtime_FeedMessage(entity: entities)
     }
 }
 
 public struct TransitRealtime_FeedEntity: Sendable {
     public var id: String
     public var tripUpdate: TransitRealtime_TripUpdate?
+    public var alert: TransitRealtime_Alert?
 
-    public init(id: String = "", tripUpdate: TransitRealtime_TripUpdate? = nil) {
+    public init(
+        id: String = "",
+        tripUpdate: TransitRealtime_TripUpdate? = nil,
+        alert: TransitRealtime_Alert? = nil
+    ) {
         self.id = id
         self.tripUpdate = tripUpdate
+        self.alert = alert
     }
 }
 
@@ -71,219 +80,210 @@ public struct TransitRealtime_StopTimeEvent: Sendable {
     }
 }
 
-private enum TransitRealtimeBinaryDecoder {
-    enum DecodeError: Error {
-        case malformedData
-        case unsupportedWireType(UInt8)
+public enum TransitRealtime_AlertEffect: String, Sendable {
+    case noService = "NO_SERVICE"
+    case reducedService = "REDUCED_SERVICE"
+    case significantDelays = "SIGNIFICANT_DELAYS"
+    case detour = "DETOUR"
+    case additionalService = "ADDITIONAL_SERVICE"
+    case modifiedService = "MODIFIED_SERVICE"
+    case otherEffect = "OTHER_EFFECT"
+    case unknownEffect = "UNKNOWN_EFFECT"
+    case stopMoved = "STOP_MOVED"
+    case noEffect = "NO_EFFECT"
+    case accessibilityIssue = "ACCESSIBILITY_ISSUE"
+    case unrecognized = "UNRECOGNIZED"
+
+    public var displayText: String {
+        switch self {
+        case .noService: return "No Service"
+        case .reducedService: return "Reduced Service"
+        case .significantDelays: return "Significant Delays"
+        case .detour: return "Detour"
+        case .additionalService: return "Additional Service"
+        case .modifiedService: return "Modified Service"
+        case .otherEffect: return "Other Effect"
+        case .unknownEffect: return "Unknown Effect"
+        case .stopMoved: return "Stop Moved"
+        case .noEffect: return "No Effect"
+        case .accessibilityIssue: return "Accessibility Issue"
+        case .unrecognized: return "Service Alert"
+        }
+    }
+}
+
+public struct TransitRealtime_Alert: Sendable {
+    public var activePeriod: [TransitRealtime_TimeRange]
+    public var informedEntity: [TransitRealtime_EntitySelector]
+    public var effect: TransitRealtime_AlertEffect
+    public var headerText: TransitRealtime_TranslatedString?
+    public var descriptionText: TransitRealtime_TranslatedString?
+
+    public init(
+        activePeriod: [TransitRealtime_TimeRange] = [],
+        informedEntity: [TransitRealtime_EntitySelector] = [],
+        effect: TransitRealtime_AlertEffect = .unknownEffect,
+        headerText: TransitRealtime_TranslatedString? = nil,
+        descriptionText: TransitRealtime_TranslatedString? = nil
+    ) {
+        self.activePeriod = activePeriod
+        self.informedEntity = informedEntity
+        self.effect = effect
+        self.headerText = headerText
+        self.descriptionText = descriptionText
+    }
+}
+
+public struct TransitRealtime_TimeRange: Sendable {
+    public var start: Int64?
+    public var end: Int64?
+
+    public init(start: Int64? = nil, end: Int64? = nil) {
+        self.start = start
+        self.end = end
+    }
+}
+
+public struct TransitRealtime_EntitySelector: Sendable {
+    public var routeID: String
+    public var stopID: String
+    public var trip: TransitRealtime_TripDescriptor?
+
+    public init(routeID: String = "", stopID: String = "", trip: TransitRealtime_TripDescriptor? = nil) {
+        self.routeID = routeID
+        self.stopID = stopID
+        self.trip = trip
+    }
+}
+
+public struct TransitRealtime_TranslatedString: Sendable {
+    public var translation: [TransitRealtime_Translation]
+
+    public init(translation: [TransitRealtime_Translation] = []) {
+        self.translation = translation
     }
 
-    static func decodeFeedMessage(from data: Data) throws -> TransitRealtime_FeedMessage {
-        var reader = ProtobufBinaryReader(data: data)
-        var message = TransitRealtime_FeedMessage()
-
-        while let tag = try reader.readTag() {
-            switch (tag.fieldNumber, tag.wireType) {
-            case (2, 2):
-                let entityData = try reader.readLengthDelimitedData()
-                let entity = try decodeFeedEntity(from: entityData)
-                message.entity.append(entity)
-            default:
-                try reader.skipField(wireType: tag.wireType)
-            }
-        }
-
-        return message
+    public var firstText: String? {
+        translation.first(where: { !$0.text.isEmpty })?.text
     }
+}
 
-    private static func decodeFeedEntity(from data: Data) throws -> TransitRealtime_FeedEntity {
-        var reader = ProtobufBinaryReader(data: data)
-        var entity = TransitRealtime_FeedEntity()
+public struct TransitRealtime_Translation: Sendable {
+    public var text: String
+    public var language: String
 
-        while let tag = try reader.readTag() {
-            switch (tag.fieldNumber, tag.wireType) {
-            case (1, 2):
-                entity.id = try reader.readLengthDelimitedString()
-            case (3, 2):
-                let tripData = try reader.readLengthDelimitedData()
-                entity.tripUpdate = try decodeTripUpdate(from: tripData)
-            default:
-                try reader.skipField(wireType: tag.wireType)
-            }
-        }
-
-        return entity
+    public init(text: String = "", language: String = "") {
+        self.text = text
+        self.language = language
     }
+}
 
-    private static func decodeTripUpdate(from data: Data) throws -> TransitRealtime_TripUpdate {
-        var reader = ProtobufBinaryReader(data: data)
-        var update = TransitRealtime_TripUpdate()
-
-        while let tag = try reader.readTag() {
-            switch (tag.fieldNumber, tag.wireType) {
-            case (1, 2):
-                let tripData = try reader.readLengthDelimitedData()
-                update.trip = try decodeTripDescriptor(from: tripData)
-            case (2, 2):
-                let stopTimeData = try reader.readLengthDelimitedData()
-                update.stopTimeUpdate.append(try decodeStopTimeUpdate(from: stopTimeData))
-            default:
-                try reader.skipField(wireType: tag.wireType)
-            }
-        }
-
-        return update
+private extension TransitRealtime_FeedEntity {
+    init(proto: GTFSProto_FeedEntity) {
+        self.init(
+            id: proto.id ?? "",
+            tripUpdate: proto.tripUpdate.map(TransitRealtime_TripUpdate.init(proto:)),
+            alert: proto.alert.map(TransitRealtime_Alert.init(proto:))
+        )
     }
+}
 
-    private static func decodeTripDescriptor(from data: Data) throws -> TransitRealtime_TripDescriptor {
-        var reader = ProtobufBinaryReader(data: data)
-        var descriptor = TransitRealtime_TripDescriptor()
-
-        while let tag = try reader.readTag() {
-            switch (tag.fieldNumber, tag.wireType) {
-            case (1, 2):
-                descriptor.tripID = try reader.readLengthDelimitedString()
-            case (5, 2):
-                descriptor.routeID = try reader.readLengthDelimitedString()
-            default:
-                try reader.skipField(wireType: tag.wireType)
-            }
-        }
-
-        return descriptor
+private extension TransitRealtime_TripUpdate {
+    init(proto: GTFSProto_TripUpdate) {
+        self.init(
+            trip: proto.trip.map(TransitRealtime_TripDescriptor.init(proto:)) ?? TransitRealtime_TripDescriptor(),
+            stopTimeUpdate: proto.stopTimeUpdate.map(TransitRealtime_StopTimeUpdate.init(proto:))
+        )
     }
+}
 
-    private static func decodeStopTimeUpdate(from data: Data) throws -> TransitRealtime_StopTimeUpdate {
-        var reader = ProtobufBinaryReader(data: data)
-        var stopTimeUpdate = TransitRealtime_StopTimeUpdate()
-
-        while let tag = try reader.readTag() {
-            switch (tag.fieldNumber, tag.wireType) {
-            case (2, 2):
-                let arrivalData = try reader.readLengthDelimitedData()
-                stopTimeUpdate.arrival = try decodeStopTimeEvent(from: arrivalData)
-            case (3, 2):
-                let departureData = try reader.readLengthDelimitedData()
-                stopTimeUpdate.departure = try decodeStopTimeEvent(from: departureData)
-            case (4, 2):
-                stopTimeUpdate.stopID = try reader.readLengthDelimitedString()
-            default:
-                try reader.skipField(wireType: tag.wireType)
-            }
-        }
-
-        return stopTimeUpdate
+private extension TransitRealtime_TripDescriptor {
+    init(proto: GTFSProto_TripDescriptor) {
+        self.init(tripID: proto.tripID ?? "", routeID: proto.routeID ?? "")
     }
+}
 
-    private static func decodeStopTimeEvent(from data: Data) throws -> TransitRealtime_StopTimeEvent {
-        var reader = ProtobufBinaryReader(data: data)
-        var event = TransitRealtime_StopTimeEvent()
-
-        while let tag = try reader.readTag() {
-            switch (tag.fieldNumber, tag.wireType) {
-            case (2, 0):
-                event.time = Int64(bitPattern: try reader.readVarint())
-            default:
-                try reader.skipField(wireType: tag.wireType)
-            }
-        }
-
-        return event
+private extension TransitRealtime_StopTimeUpdate {
+    init(proto: GTFSProto_StopTimeUpdate) {
+        self.init(
+            stopID: proto.stopID ?? "",
+            arrival: proto.arrival.map(TransitRealtime_StopTimeEvent.init(proto:)),
+            departure: proto.departure.map(TransitRealtime_StopTimeEvent.init(proto:))
+        )
     }
+}
 
-    private struct Tag {
-        let fieldNumber: Int
-        let wireType: UInt8
+private extension TransitRealtime_StopTimeEvent {
+    init(proto: GTFSProto_StopTimeEvent) {
+        self.init(time: proto.time)
     }
+}
 
-    private struct ProtobufBinaryReader {
-        private let data: Data
-        private var index: Int
+private extension TransitRealtime_Alert {
+    init(proto: GTFSProto_Alert) {
+        self.init(
+            activePeriod: proto.activePeriod.map(TransitRealtime_TimeRange.init(proto:)),
+            informedEntity: proto.informedEntity.map(TransitRealtime_EntitySelector.init(proto:)),
+            effect: TransitRealtime_AlertEffect(proto: proto.effect),
+            headerText: proto.headerText.flatMap(TransitRealtime_TranslatedString.init(proto:)),
+            descriptionText: proto.descriptionText.flatMap(TransitRealtime_TranslatedString.init(proto:))
+        )
+    }
+}
 
-        init(data: Data) {
-            self.data = data
-            self.index = 0
+private extension TransitRealtime_AlertEffect {
+    init(proto: GTFSProto_Alert.Effect?) {
+        guard let proto else {
+            self = .unknownEffect
+            return
         }
 
-        var isAtEnd: Bool {
-            index >= data.count
+        switch proto {
+        case .noService: self = .noService
+        case .reducedService: self = .reducedService
+        case .significantDelays: self = .significantDelays
+        case .detour: self = .detour
+        case .additionalService: self = .additionalService
+        case .modifiedService: self = .modifiedService
+        case .otherEffect: self = .otherEffect
+        case .unknownEffect: self = .unknownEffect
+        case .stopMoved: self = .stopMoved
+        case .noEffect: self = .noEffect
+        case .accessibilityIssue: self = .accessibilityIssue
+        case .UNRECOGNIZED: self = .unrecognized
+        }
+    }
+}
+
+private extension TransitRealtime_TimeRange {
+    init(proto: GTFSProto_TimeRange) {
+        self.init(start: proto.start.flatMap(Int64.init(exactly:)), end: proto.end.flatMap(Int64.init(exactly:)))
+    }
+}
+
+private extension TransitRealtime_EntitySelector {
+    init(proto: GTFSProto_EntitySelector) {
+        self.init(
+            routeID: proto.routeID ?? "",
+            stopID: proto.stopID ?? "",
+            trip: proto.trip.map(TransitRealtime_TripDescriptor.init(proto:))
+        )
+    }
+}
+
+private extension TransitRealtime_TranslatedString {
+    init?(proto: GTFSProto_TranslatedString) {
+        let translations = proto.translation.map(TransitRealtime_Translation.init(proto:))
+        guard !translations.isEmpty else {
+            return nil
         }
 
-        mutating func readTag() throws -> Tag? {
-            if isAtEnd {
-                return nil
-            }
+        self.init(translation: translations)
+    }
+}
 
-            let key = try readVarint()
-            let fieldNumber = Int(key >> 3)
-            let wireType = UInt8(key & 0x07)
-            return Tag(fieldNumber: fieldNumber, wireType: wireType)
-        }
-
-        mutating func readVarint() throws -> UInt64 {
-            var result: UInt64 = 0
-            var shift: UInt64 = 0
-
-            while true {
-                guard index < data.count else {
-                    throw DecodeError.malformedData
-                }
-
-                let byte = data[index]
-                index += 1
-
-                result |= UInt64(byte & 0x7F) << shift
-
-                if byte & 0x80 == 0 {
-                    return result
-                }
-
-                shift += 7
-                if shift > 63 {
-                    throw DecodeError.malformedData
-                }
-            }
-        }
-
-        mutating func readLengthDelimitedData() throws -> Data {
-            let length = try Int(readVarint())
-            guard length >= 0, index + length <= data.count else {
-                throw DecodeError.malformedData
-            }
-
-            let value = data.subdata(in: index..<(index + length))
-            index += length
-            return value
-        }
-
-        mutating func readLengthDelimitedString() throws -> String {
-            let bytes = try readLengthDelimitedData()
-            guard let value = String(data: bytes, encoding: .utf8) else {
-                throw DecodeError.malformedData
-            }
-            return value
-        }
-
-        mutating func skipField(wireType: UInt8) throws {
-            switch wireType {
-            case 0:
-                _ = try readVarint()
-            case 1:
-                try skip(byteCount: 8)
-            case 2:
-                let length = try Int(readVarint())
-                try skip(byteCount: length)
-            case 5:
-                try skip(byteCount: 4)
-            default:
-                throw DecodeError.unsupportedWireType(wireType)
-            }
-        }
-
-        private mutating func skip(byteCount: Int) throws {
-            guard byteCount >= 0, index + byteCount <= data.count else {
-                throw DecodeError.malformedData
-            }
-            index += byteCount
-        }
+private extension TransitRealtime_Translation {
+    init(proto: GTFSProto_TranslatedString_Translation) {
+        self.init(text: proto.text ?? "", language: proto.language ?? "")
     }
 }

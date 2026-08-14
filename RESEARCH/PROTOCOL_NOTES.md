@@ -87,27 +87,30 @@ Source examples:
 
 - Start mic: `0x0E 0x01`
 - Stop mic: `0x0E 0x00`
-- Stream from glasses: `0xF1 <seq> <audio bytes...>` (LC3 in demo/community implementations)
+- Stream from glasses: `0xF1 <seq> <audio bytes...>`
+- Vendor decoder parameters: LC3, 20 encoded bytes/frame, 10 ms/frame,
+  16 kHz mono output (160 signed 16-bit PCM samples/frame)
 - Practical behavior in community repos:
   - mic control sent to right side for reliability in some cases
 
 Source examples:
 - `EvenDemoApp-main/README.md`
+- `EvenDemoApp-main/ios/Runner/PcmConverter.m`
 - `MentraOS-main/mobile/modules/core/ios/Source/sgcs/G1.swift`
 
 ## 7) Bitmap Upload (0x15 / 0x20 / 0x16)
 
 Canonical sequence:
 
-1) Split BMP into 194-byte chunks
-2) Send each chunk with `0x15` and index
+1) Serialize a complete Windows 3.x 1-bit BMP and split it into 194-byte chunks
+2) Send each chunk with `0x15` and a one-byte index
 3) First chunk includes address bytes `00 1C 00 00`
 4) Send end packet: `0x20 0D 0E`
 5) Send CRC packet: `0x16 <crc bytes>`
 
 CRC details:
 
-- Repos mention CRC32-XZ / Crc32Xz in big-endian byte order for transmission.
+- CRC32-XZ is calculated over the four-byte storage address followed by the complete BMP file, then transmitted in big-endian byte order.
 - Multiple implementations exist; some use explicit CRC32-XZ table logic, some use standard CRC32 fallback.
 
 Source examples:
@@ -126,6 +129,10 @@ Source examples:
 - Command `0x4B`
 - JSON payload under `ncs_notification`
 - chunk header pattern typically `[0x4B, msgId, totalChunks, chunkIndex]`
+- EvenG1 Swift exposes typed whitelist/notification builders and sends these
+  vendor transactions through the left arm with bounded packet counts,
+  acknowledgements, and retries. The app includes a manual test sender; iOS
+  does not expose other apps' Notification Center contents for arbitrary relay.
 
 Source examples:
 - `EvenDemoApp-main/lib/services/proto.dart`
@@ -134,10 +141,12 @@ Source examples:
 
 ## 9) Dashboard / Hardware / Navigation Commands Seen In Practice
 
-- Dashboard layout/show families: `0x06`, `0x26`
-- Head-up angle: `0x0B`
+- Dashboard layout/show families: `0x06`, `0x07`
+- Head-up behavior/angle: `0x0A` / `0x0B` (firmware-dependent)
 - Silent mode: `0x03`
-- Navigation control packets via `0x0A`
+- Raster/display position settings: `0x26` (length, sequence, action, enable, height, distance)
+- Experimental navigation packets currently use `0x0A`; this payload family is inferred and remains hardware-gated, not vendor-documented
 
 Source examples:
 - `MentraOS-main/mobile/modules/core/ios/Source/sgcs/G1.swift`
+- [EvenDemoApp issue #33 (`0x26` display settings)](https://github.com/even-realities/EvenDemoApp/issues/33)

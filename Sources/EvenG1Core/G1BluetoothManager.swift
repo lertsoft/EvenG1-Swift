@@ -6,13 +6,58 @@ import os.log
 /// Logger for G1 Bluetooth operations
 private let logger = Logger(subsystem: "com.eveng1", category: "Bluetooth")
 
+/// FIFO async gate used on the main actor to prevent command-state races across
+/// suspension points. A resumed waiter owns the gate until it releases it.
+@MainActor
+private final class G1AsyncGate {
+    private var isLocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiterHead = 0
+
+    func acquire() async -> Bool {
+        guard !Task.isCancelled else { return false }
+
+        if !isLocked {
+            isLocked = true
+            return true
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+
+        if Task.isCancelled {
+            release()
+            return false
+        }
+        return true
+    }
+
+    func release() {
+        guard waiterHead < waiters.count else {
+            waiters.removeAll(keepingCapacity: true)
+            waiterHead = 0
+            isLocked = false
+            return
+        }
+
+        let continuation = waiters[waiterHead]
+        waiterHead += 1
+        if waiterHead >= 64, waiterHead * 2 >= waiters.count {
+            waiters.removeFirst(waiterHead)
+            waiterHead = 0
+        }
+        continuation.resume()
+    }
+}
+
 /// Main Bluetooth manager for Even G1 glasses
-/// Inspired by MentraOS patterns with dedicated queues, reconnection, and persistence
+/// Inspired by MentraOS patterns with reconnection and persistence.
 @MainActor
 public final class G1BluetoothManager: NSObject, ObservableObject {
-    
+
     // MARK: - Published State
-    
+
     /// Current connection state
     @Published public private(set) var connectionState: GlassesConnectionState = .disconnected
     
@@ -27,6 +72,10 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     
     /// Parsed events from glasses
     @Published public private(set) var events: [G1Event] = []
+
+    /// Monotonic revision that changes for every parsed event, including after
+    /// the bounded `events` history reaches its capacity.
+    @Published public private(set) var eventRevision: UInt64 = 0
     
     /// Latest frames (for raw data view)
     @Published public private(set) var recentFrames: [G1Frame] = []
@@ -40,6 +89,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Whether the glasses dashboard is currently shown (tracked app-side).
     @Published public private(set) var isDashboardVisible: Bool = false
 
+    /// Last display-position setting acknowledged by both arms.
+    @Published public private(set) var displayPositionSettings: G1DisplayPositionSettings?
+
     /// Glasses microphone capture state.
     @Published public private(set) var microphoneState: G1MicrophoneState = .idle
 
@@ -50,6 +102,27 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         byteCount: 0,
         lastSequence: nil
     )
+
+    /// Navigation session lifecycle state.
+    @Published public private(set) var navigationSessionState: G1NavigationSessionState = .inactive
+
+    /// Active navigation mode for the current or next session.
+    @Published public private(set) var navigationMode: G1NavigationMode = .walking
+
+    /// Current transport mode for navigation payload delivery.
+    @Published public private(set) var navigationTransportMode: G1NavigationTransportMode = .nativePackets
+
+    /// Whether navigation overlay content should be shown on phone UI.
+    @Published public private(set) var isNavigationOverlayVisible: Bool = true
+
+    /// Whether periodic navigation status announcements are muted.
+    @Published public private(set) var isNavigationMuted: Bool = false
+
+    /// Most recent instruction mirrored to glasses.
+    @Published public private(set) var lastNavigationInstruction: G1NavigationInstruction?
+
+    /// Structured trace entries for navigation TX/RX flow (exportable JSONL).
+    @Published public private(set) var navigationTraceEntries: [G1NavigationTraceEntry] = []
 
     /// Callback stream for raw microphone packet payloads.
     public let microphonePackets = PassthroughSubject<G1MicrophonePacket, Never>()
@@ -78,17 +151,14 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     
     // MARK: - Private Properties
     
-    /// Dedicated BLE queue (MentraOS pattern)
-    private let bleQueue = DispatchQueue(label: "com.eveng1.bluetooth", qos: .userInitiated)
-    
     /// Central manager
     private var centralManager: CBCentralManager!
     
     /// Peripheral references by UUID
     private var peripheralsByUUID: [UUID: CBPeripheral] = [:]
     
-    /// Heartbeat timer
-    private var heartbeatTimer: Timer?
+    /// Structured heartbeat loop
+    private var heartbeatTask: Task<Void, Never>?
     private var heartbeatCounter: UInt8 = 0
     private var missedHeartbeatAcks: Int = 0
     
@@ -110,13 +180,66 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         let timeoutTask: Task<Void, Never>
         let continuation: CheckedContinuation<Bool, Never>
     }
+
+    /// A protocol packet waiting for Core Bluetooth's write-without-response
+    /// transmit buffer. Packet boundaries must remain intact for the glasses.
+    private struct PendingWrite {
+        let peripheralIdentifier: UUID
+        let data: Data
+        let side: GlassesSide
+        let logPrefix: String
+        let prepareForWrite: (() -> Void)?
+        let failBeforeWrite: (() -> Void)?
+    }
+
+    /// Amortized O(1) FIFO storage. Array.removeFirst() copied the remaining
+    /// write backlog for every BLE packet during bitmap transfers.
+    private struct PendingWriteQueue {
+        private var storage: [PendingWrite] = []
+        private var head = 0
+
+        var count: Int { storage.count - head }
+
+        mutating func append(_ write: PendingWrite) {
+            storage.append(write)
+        }
+
+        mutating func popFirst() -> PendingWrite? {
+            guard head < storage.count else { return nil }
+            let write = storage[head]
+            head += 1
+
+            if head >= 64, head * 2 >= storage.count {
+                storage.removeFirst(head)
+                head = 0
+            }
+            return write
+        }
+
+        mutating func removeAll() -> [PendingWrite] {
+            let remaining = head < storage.count ? Array(storage[head...]) : []
+            storage.removeAll(keepingCapacity: true)
+            head = 0
+            return remaining
+        }
+    }
     
     private var pendingAcks: [AckKey: PendingAck] = [:]
+    private let ackCommandGate = G1AsyncGate()
+    private let navigationCommandGate = G1AsyncGate()
+    private let displayCommandGate = G1AsyncGate()
+    private var pendingWrites: [GlassesSide: PendingWriteQueue] = [
+        .left: PendingWriteQueue(),
+        .right: PendingWriteQueue()
+    ]
+    private static let maxPendingWritesPerSide = 512
     
     /// Reconnection state
     private var reconnectionAttempts: Int = 0
-    private var reconnectionTimer: DispatchSourceTimer?
+    private var reconnectionTask: Task<Void, Never>?
     private var isIntentionalDisconnect: Bool = false
+    private var shouldReconnectAfterCentralRecovery: Bool = false
+    private var isReconnecting: Bool = false
 
     /// Dashboard fallback debounce for event-driven show/hide.
     private var lastDashboardFallbackActionAt: Date?
@@ -124,6 +247,18 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
     /// Side currently handling microphone control.
     private var activeMicrophoneSide: GlassesSide?
+
+    /// Sequence used by the vendor-documented 0x26 display settings packet.
+    private var displaySettingsSequence: UInt8 = 0
+
+    /// Transport ID used by the vendor notification packet header.
+    private var notificationTransportID: UInt8 = 0
+
+    /// Native-first navigation delivery controller.
+    private var navigationTransport = G1NavigationTransport()
+
+    /// Last known progress context for trace enrichment.
+    private var lastNavigationProgress: G1NavigationProgress?
     
     /// Persistence keys
     private static let lastLeftUUIDKey = "G1_LastLeftPeripheralUUID"
@@ -159,24 +294,35 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         super.init()
         frameParser.protocolMode = protocolMode
         heartbeatMode = initialHeartbeatMode()
-        // Initialize central manager on BLE queue
-        centralManager = CBCentralManager(delegate: self, queue: bleQueue, options: [
+        // A nil queue delivers delegate callbacks on the main queue, matching
+        // this manager's main-actor-isolated delegate implementations.
+        centralManager = CBCentralManager(delegate: self, queue: nil, options: [
             CBCentralManagerOptionShowPowerAlertKey: true
         ])
     }
     
     deinit {
-        heartbeatTimer?.invalidate()
-        reconnectionTimer?.cancel()
+        heartbeatTask?.cancel()
+        reconnectionTask?.cancel()
     }
     
     // MARK: - Public API
     
     /// Start scanning for Even G1 glasses
     public func startScanning() {
+        beginScanning(forReconnection: false)
+    }
+
+    private func beginScanning(forReconnection: Bool) {
         guard centralManager.state == .poweredOn else {
             log("Cannot scan: Bluetooth not powered on", level: .warning)
             return
+        }
+
+        if !forReconnection {
+            isReconnecting = false
+            stopReconnectionTimer()
+            reconnectionAttempts = 0
         }
         
         isScanning = true
@@ -199,6 +345,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             )
             ingestDiscoveredPeripheral(peripheral, evaluation: evaluation)
         }
+
+        // Seeding may have completed an automatic reconnection synchronously.
+        guard isScanning else { return }
         
         // Broad scan first, then filter in didDiscover.
         // Some firmware versions may not advertise UART service UUIDs during scan.
@@ -217,6 +366,10 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     
     /// Connect to a discovered glasses pair
     public func connect(to pair: DiscoveredGlassesPair) {
+        connect(to: pair, forReconnection: false)
+    }
+
+    private func connect(to pair: DiscoveredGlassesPair, forReconnection: Bool) {
         guard pair.isComplete else {
             log("Cannot connect: Pair incomplete (need both L and R)", level: .warning)
             return
@@ -224,7 +377,10 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         
         stopScanning()
         isIntentionalDisconnect = false
-        reconnectionAttempts = 0
+        isReconnecting = forReconnection
+        if !forReconnection {
+            reconnectionAttempts = 0
+        }
         
         // Create connected glasses pair
         let connected = ConnectedGlassesPair(channel: pair.channel)
@@ -257,9 +413,12 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Disconnect from current glasses
     public func disconnect() {
         isIntentionalDisconnect = true
+        shouldReconnectAfterCentralRecovery = false
+        isReconnecting = false
         stopReconnectionTimer()
         stopHeartbeat()
         cancelAllPendingAcks()
+        failAllQueuedWrites()
         
         if let glasses = connectedGlasses {
             if let left = glasses.leftPeripheral {
@@ -273,28 +432,40 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         connectedGlasses = nil
         connectionState = .disconnected
         isDashboardVisible = false
+        displayPositionSettings = nil
         activeMicrophoneSide = nil
         microphoneState = .idle
         microphoneStats = G1MicrophoneStats(startedAt: nil, packetCount: 0, byteCount: 0, lastSequence: nil)
+        navigationSessionState = .inactive
+        navigationMode = .walking
+        isNavigationOverlayVisible = true
+        isNavigationMuted = false
+        lastNavigationInstruction = nil
+        lastNavigationProgress = nil
+        navigationTransport.reset(transportMode: .nativePackets)
+        navigationTransportMode = navigationTransport.transportMode
         log("Disconnected", level: .info)
     }
     
     /// Send command to both glasses
-    public func sendCommand(_ data: Data, to side: GlassesSide? = nil) {
+    @discardableResult
+    public func sendCommand(_ data: Data, to side: GlassesSide? = nil) -> Bool {
         guard let glasses = connectedGlasses else {
             log("Cannot send: Not connected", level: .warning)
-            return
+            return false
         }
         
         let sendToLeft = side == nil || side == .left
         let sendToRight = side == nil || side == .right
         
+        var accepted = true
         if sendToLeft {
-            write(data, to: glasses.leftPeripheral, using: glasses.leftTXCharacteristic, side: .left)
+            accepted = write(data, to: glasses.leftPeripheral, using: glasses.leftTXCharacteristic, side: .left) && accepted
         }
         if sendToRight {
-            write(data, to: glasses.rightPeripheral, using: glasses.rightTXCharacteristic, side: .right)
+            accepted = write(data, to: glasses.rightPeripheral, using: glasses.rightTXCharacteristic, side: .right) && accepted
         }
+        return accepted
     }
     
     /// Send command and await ACK on one or both sides.
@@ -303,6 +474,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
                                     to side: GlassesSide? = nil,
                                     sequence: UInt8? = nil,
                                     timeoutMs: Int = G1BLEConstants.commandTimeoutMs) async -> Bool {
+        guard await ackCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { ackCommandGate.release() }
+
         guard let glasses = connectedGlasses else {
             log("Cannot send with ACK: Not connected", level: .warning)
             return false
@@ -420,8 +594,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
     nonisolated private static func looksLikeLC3AudioLength(_ byteCount: Int) -> Bool {
         guard byteCount > 0 else { return false }
-        let commonFrameSizes = [20, 30, 40, 60]
-        return commonFrameSizes.contains { byteCount % $0 == 0 }
+        return byteCount.isMultiple(of: G1LC3Decoder.encodedFrameByteCount)
     }
 
     nonisolated static func fallbackDashboardVisibility(config: G1TiltDashboardConfig?,
@@ -458,12 +631,17 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
              G1CompatibilityCommand.brightnessV2,
              G1CompatibilityCommand.brightnessLegacy,
              G1Command.SILENT_MODE.rawValue,
+             G1Command.EXIT_ALL.rawValue,
              G1CompatibilityCommand.dashboardVisibility,
              G1CompatibilityCommand.headUpMode,
              G1CompatibilityCommand.headUpModeAlt,
              G1CompatibilityCommand.microphonePrimary,
              G1CompatibilityCommand.microphoneFallback,
+             G1CompatibilityCommand.navigationPrimary,
+             G1Command.DISPLAY_SETTINGS.rawValue,
              G1Command.WHITELIST.rawValue,
+             G1Command.NOTIFICATION.rawValue,
+             G1Command.BMP_DATA.rawValue,
              G1Command.BMP_END.rawValue,
              G1Command.CRC_CHECK.rawValue,
              G1Command.SEND_TEXT.rawValue:
@@ -486,11 +664,6 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
     /// Send text using a structured request
     public func sendText(_ request: G1TextSendRequest) {
-        guard connectionState == .fullyConnected else {
-            log("Cannot send text: Not fully connected", level: .warning)
-            return
-        }
-
         let builder = G1TextPacketBuilder(textHelper: textHelper)
         let packets = builder.buildPackets(for: request)
 
@@ -499,12 +672,25 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             return
         }
 
-        let preview = request.text.prefix(30)
-        let suffix = request.text.count > 30 ? "..." : ""
-        log("Sending \(request.mode.displayName) text: \"\(preview)\(suffix)\" (packets: \(packets.count), ack: \(request.awaitAck))", level: .info)
-
         Task {
+            guard await displayCommandGate.acquire(), !Task.isCancelled else { return }
+            defer { displayCommandGate.release() }
+
+            guard connectionState == .fullyConnected else {
+                log("Cannot send text: Not fully connected", level: .warning)
+                return
+            }
+
+            let preview = request.text.prefix(30)
+            let suffix = request.text.count > 30 ? "..." : ""
+            log("Sending \(request.mode.displayName) text: \"\(preview)\(suffix)\" (packets: \(packets.count), ack: \(request.awaitAck))", level: .info)
+
             for (index, packet) in packets.enumerated() {
+                guard !Task.isCancelled else {
+                    log("Text send cancelled", level: .debug)
+                    return
+                }
+
                 if request.awaitAck {
                     let acked = await sendCommandAwaitAck(packet.data, sequence: nil)
                     if !acked {
@@ -512,21 +698,166 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
                         break
                     }
                 } else {
-                    sendCommand(packet.data)
+                    guard sendCommand(packet.data) else {
+                        log("Text send stopped because packet \(index + 1)/\(packets.count) could not be queued", level: .warning)
+                        return
+                    }
                 }
 
                 if index < packets.count - 1 {
-                    try? await Task.sleep(nanoseconds: request.interPacketDelayMs * 1_000_000)
+                    do {
+                        try await Task.sleep(for: .milliseconds(Int64(clamping: request.interPacketDelayMs)))
+                    } catch {
+                        log("Text send cancelled", level: .debug)
+                        return
+                    }
                 }
             }
         }
     }
+
+    /// Send a full bitmap frame using BMP upload commands, then finalize with end + CRC.
+    @discardableResult
+    public func sendBitmap(_ frame: G1BitmapFrame,
+                           awaitChunkAck: Bool = false,
+                           interPacketDelayMs: UInt64 = 8) async -> Bool {
+        guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { displayCommandGate.release() }
+
+        guard connectionState == .fullyConnected else {
+            log("Cannot send bitmap: Not fully connected", level: .warning)
+            return false
+        }
+
+        let builder = G1BitmapPacketBuilder()
+        let envelope: G1BitmapPacketEnvelope
+        do {
+            envelope = try builder.buildPackets(for: frame)
+        } catch {
+            log("Bitmap packet build failed: \(error)", level: .warning)
+            return false
+        }
+
+        for (index, packet) in envelope.dataPackets.enumerated() {
+            if awaitChunkAck {
+                let chunkAcked = await sendCommandAwaitAck(
+                    packet,
+                    sequence: nil,
+                    timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+                )
+                if !chunkAcked {
+                    log("Bitmap chunk ACK failed (\(index + 1)/\(envelope.dataPackets.count))", level: .warning)
+                    return false
+                }
+            } else {
+                guard sendCommand(packet) else {
+                    log("Bitmap chunk could not be queued (\(index + 1)/\(envelope.dataPackets.count))", level: .warning)
+                    return false
+                }
+            }
+
+            if index < envelope.dataPackets.count - 1, interPacketDelayMs > 0 {
+                do {
+                    try await Task.sleep(for: .milliseconds(Int64(clamping: interPacketDelayMs)))
+                } catch {
+                    log("Bitmap send cancelled", level: .debug)
+                    return false
+                }
+            }
+        }
+
+        let endAcked = await sendCommandAwaitAck(
+            envelope.endPacket,
+            sequence: nil,
+            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+        )
+        guard endAcked else {
+            log("Bitmap end packet ACK failed", level: .warning)
+            return false
+        }
+
+        let crcAcked = await sendCommandAwaitAck(
+            envelope.crcPacket,
+            sequence: nil,
+            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+        )
+        guard crcAcked else {
+            log("Bitmap CRC packet ACK failed", level: .warning)
+            return false
+        }
+
+        log("Bitmap sent (\(frame.width)x\(frame.height), packets: \(envelope.dataPackets.count))", level: .info)
+        return true
+    }
     
     /// Clear the glasses display
     public func clearDisplay() {
-        let exitCommand = Data([G1Command.EXIT_ALL.rawValue])
-        sendCommand(exitCommand)
-        log("Display cleared", level: .info)
+        Task {
+            guard await displayCommandGate.acquire(), !Task.isCancelled else { return }
+            defer { displayCommandGate.release() }
+
+            let exitCommand = Data([G1Command.EXIT_ALL.rawValue])
+            let acked = await sendCommandAwaitAck(
+                exitCommand,
+                timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
+            )
+            if acked {
+                log("Display cleared", level: .info)
+            } else {
+                log("Exit-all command was not acknowledged", level: .warning)
+            }
+        }
+    }
+
+    /// Configure the vendor notification whitelist on the left arm.
+    ///
+    /// The official demo routes notification configuration only through the
+    /// left BLE peripheral; the glasses firmware coordinates display state.
+    @discardableResult
+    public func configureNotificationWhitelist(
+        _ whitelist: G1NotificationWhitelist,
+        retryAttempts: Int = 3
+    ) async -> Bool {
+        let packets: [Data]
+        do {
+            packets = try G1NotificationPacketBuilder().buildWhitelistPackets(for: whitelist)
+        } catch {
+            log("Notification whitelist packet build failed: \(error)", level: .warning)
+            return false
+        }
+
+        return await sendNotificationPacketTransaction(
+            packets,
+            label: "Notification whitelist",
+            retryAttempts: retryAttempts
+        )
+    }
+
+    /// Send a vendor-formatted notification to the glasses through the left arm.
+    @discardableResult
+    public func sendNotification(
+        _ notification: G1Notification,
+        retryAttempts: Int = 6
+    ) async -> Bool {
+        let transportID = notificationTransportID
+        notificationTransportID &+= 1
+
+        let packets: [Data]
+        do {
+            packets = try G1NotificationPacketBuilder().buildNotificationPackets(
+                for: notification,
+                transportID: transportID
+            )
+        } catch {
+            log("Notification packet build failed: \(error)", level: .warning)
+            return false
+        }
+
+        return await sendNotificationPacketTransaction(
+            packets,
+            label: "Notification",
+            retryAttempts: retryAttempts
+        )
     }
     
     /// Set display brightness (0-100)
@@ -556,8 +887,17 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Set silent mode
     public func setSilentMode(_ enabled: Bool) {
         let command = Data([G1Command.SILENT_MODE.rawValue, enabled ? 0x0C : 0x0A, 0x00])
-        sendCommand(command)
-        log("Silent mode: \(enabled ? "ON" : "OFF")", level: .info)
+        Task {
+            let acked = await sendCommandAwaitAck(
+                command,
+                timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
+            )
+            if acked {
+                log("Silent mode: \(enabled ? "ON" : "OFF")", level: .info)
+            } else {
+                log("Silent-mode command was not acknowledged", level: .warning)
+            }
+        }
     }
 
     /// Configure firmware-assisted dashboard activation via head-up behavior.
@@ -633,6 +973,32 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             log("Dashboard visibility command failed", level: .warning)
         }
 
+        return acked
+    }
+
+    /// Apply the vendor-documented raster height and eye-distance settings.
+    @discardableResult
+    public func setDisplayPosition(_ settings: G1DisplayPositionSettings) async -> Bool {
+        guard connectionState == .fullyConnected else {
+            log("Cannot set display position: Glasses are not fully connected", level: .warning)
+            return false
+        }
+
+        let sequence = displaySettingsSequence
+        displaySettingsSequence &+= 1
+        let packet = G1DisplaySettingsPacketBuilder.positionPacket(settings: settings, sequence: sequence)
+        let acked = await sendCommandAwaitAck(
+            packet,
+            sequence: nil,
+            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+        )
+
+        if acked {
+            displayPositionSettings = settings
+            log("Display position set: height \(settings.height), distance \(settings.distance)", level: .info)
+        } else {
+            log("Display position command failed", level: .warning)
+        }
         return acked
     }
 
@@ -722,21 +1088,286 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             lastSequence: nil
         )
     }
+
+    /// Update visibility state for in-app navigation overlay.
+    public func setNavigationOverlayVisible(_ visible: Bool) {
+        isNavigationOverlayVisible = visible
+    }
+
+    public func setNavigationSessionState(_ state: G1NavigationSessionState) {
+        navigationSessionState = state
+    }
+
+    /// Toggle navigation guidance mute state and return the new value.
+    @discardableResult
+    public func toggleNavigationMute() -> Bool {
+        isNavigationMuted.toggle()
+        return isNavigationMuted
+    }
+
+    /// Set active navigation mode on glasses.
+    @discardableResult
+    public func setNavigationMode(_ mode: G1NavigationMode) async -> Bool {
+        guard await navigationCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { navigationCommandGate.release() }
+        return await setNavigationModeWhileLocked(mode)
+    }
+
+    private func setNavigationModeWhileLocked(_ mode: G1NavigationMode) async -> Bool {
+        guard connectionState == .fullyConnected else {
+            log("Cannot set navigation mode: Glasses are not fully connected", level: .warning)
+            return false
+        }
+
+        navigationMode = mode
+        let packet = G1NavigationPacketBuilder.modePacket(mode: mode)
+        var transport = navigationTransport
+        let result = await transport.performNativePreferred(
+            nativeSend: {
+                await self.sendNavigationNativePacket(
+                    packet,
+                    mode: mode,
+                    progress: self.lastNavigationProgress,
+                    note: "set_mode"
+                )
+            },
+            fallbackSend: {
+                self.sendText("NAV \(mode.shortLabel)")
+            }
+        )
+        guard connectionState == .fullyConnected else { return false }
+        navigationTransport = transport
+        navigationTransportMode = navigationTransport.transportMode
+        if result.downgradedToText {
+            log("Navigation transport downgraded to text fallback", level: .warning)
+        }
+        return result.nativeAcked || result.deliveryMode == .textFallback
+    }
+
+    /// Start a navigation session.
+    @discardableResult
+    public func startNavigationSession(mode: G1NavigationMode,
+                                       initialInstruction: G1NavigationInstruction? = nil) async -> Bool {
+        guard await navigationCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { navigationCommandGate.release() }
+
+        guard connectionState == .fullyConnected else {
+            log("Cannot start navigation transport: Glasses are not fully connected", level: .warning)
+            navigationSessionState = .inactive
+            return false
+        }
+
+        navigationMode = mode
+        navigationSessionState = .active
+        isNavigationMuted = false
+        isNavigationOverlayVisible = true
+        lastNavigationProgress = nil
+        lastNavigationInstruction = nil
+        navigationTransport.reset(transportMode: .nativePackets)
+        navigationTransportMode = navigationTransport.transportMode
+
+        guard await setNavigationModeWhileLocked(mode), connectionState == .fullyConnected else {
+            navigationSessionState = .inactive
+            return false
+        }
+
+        let startPacket = G1NavigationPacketBuilder.startPacket(mode: mode)
+        var transport = navigationTransport
+        let startResult = await transport.performNativePreferred(
+            nativeSend: {
+                await self.sendNavigationNativePacket(startPacket, mode: mode, progress: nil, note: "start_session")
+            },
+            fallbackSend: {
+                self.sendText("Start \(mode.displayName) navigation")
+            }
+        )
+        guard connectionState == .fullyConnected else {
+            navigationSessionState = .inactive
+            return false
+        }
+        navigationTransport = transport
+        navigationTransportMode = navigationTransport.transportMode
+
+        if let initialInstruction {
+            _ = await sendNavigationInstructionWhileLocked(initialInstruction)
+        }
+
+        return startResult.nativeAcked || startResult.deliveryMode == .textFallback
+    }
+
+    /// Push updated route progress to glasses.
+    @discardableResult
+    public func updateNavigationSession(progress: G1NavigationProgress) async -> Bool {
+        guard await navigationCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { navigationCommandGate.release() }
+
+        guard connectionState == .fullyConnected else {
+            return false
+        }
+
+        navigationSessionState = .active
+        lastNavigationProgress = progress
+
+        let nativePacket: Data?
+        do {
+            nativePacket = try G1NavigationPacketBuilder.progressPacket(progress)
+        } catch {
+            nativePacket = nil
+        }
+
+        guard let nativePacket else {
+            navigationTransport.forceTextFallback()
+            navigationTransportMode = navigationTransport.transportMode
+            sendText(G1NavigationPacketBuilder.fallbackSummaryText(mode: navigationMode, progress: progress))
+            return true
+        }
+
+        var transport = navigationTransport
+        let result = await transport.performNativePreferred(
+            nativeSend: {
+                await self.sendNavigationNativePacket(nativePacket, mode: self.navigationMode, progress: progress, note: "progress")
+            },
+            fallbackSend: {
+                self.sendText(G1NavigationPacketBuilder.fallbackSummaryText(mode: self.navigationMode, progress: progress))
+            }
+        )
+        guard connectionState == .fullyConnected else { return false }
+        navigationTransport = transport
+        navigationTransportMode = navigationTransport.transportMode
+        if result.downgradedToText {
+            log("Navigation progress switched to text fallback", level: .warning)
+        }
+        return result.nativeAcked || result.deliveryMode == .textFallback
+    }
+
+    /// Send the current maneuver instruction to glasses.
+    @discardableResult
+    public func sendNavigationInstruction(_ instruction: G1NavigationInstruction) async -> Bool {
+        guard await navigationCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { navigationCommandGate.release() }
+        return await sendNavigationInstructionWhileLocked(instruction)
+    }
+
+    private func sendNavigationInstructionWhileLocked(_ instruction: G1NavigationInstruction) async -> Bool {
+        guard connectionState == .fullyConnected else {
+            return false
+        }
+
+        lastNavigationInstruction = instruction
+
+        let nativePacket: Data?
+        do {
+            nativePacket = try G1NavigationPacketBuilder.instructionPacket(instruction)
+        } catch {
+            nativePacket = nil
+        }
+
+        guard let nativePacket else {
+            navigationTransport.forceTextFallback()
+            navigationTransportMode = navigationTransport.transportMode
+            sendText(instruction.fallbackText())
+            return true
+        }
+
+        let progress = G1NavigationProgress(
+            stepIndex: instruction.stepIndex,
+            totalSteps: instruction.totalSteps,
+            remainingDistanceMeters: instruction.remainingDistanceMeters,
+            remainingDurationSeconds: max(0, (instruction.etaEpochSeconds ?? 0) - Int(Date().timeIntervalSince1970)),
+            etaEpochSeconds: instruction.etaEpochSeconds
+        )
+        lastNavigationProgress = progress
+
+        var transport = navigationTransport
+        let result = await transport.performNativePreferred(
+            nativeSend: {
+                await self.sendNavigationNativePacket(nativePacket, mode: self.navigationMode, progress: progress, note: "instruction")
+            },
+            fallbackSend: {
+                self.sendText(instruction.fallbackText())
+            }
+        )
+        guard connectionState == .fullyConnected else { return false }
+        navigationTransport = transport
+        navigationTransportMode = navigationTransport.transportMode
+        if result.downgradedToText {
+            log("Navigation instruction switched to text fallback", level: .warning)
+        }
+        return result.nativeAcked || result.deliveryMode == .textFallback
+    }
+
+    /// End the current navigation session.
+    @discardableResult
+    public func stopNavigationSession(sendSummary: Bool = true) async -> Bool {
+        guard await navigationCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { navigationCommandGate.release() }
+
+        guard connectionState == .fullyConnected else {
+            navigationSessionState = .inactive
+            lastNavigationInstruction = nil
+            lastNavigationProgress = nil
+            navigationTransport.reset(transportMode: .nativePackets)
+            navigationTransportMode = navigationTransport.transportMode
+            return false
+        }
+
+        let endPacket = G1NavigationPacketBuilder.endPacket()
+        var transport = navigationTransport
+        let result = await transport.performNativePreferred(
+            nativeSend: {
+                await self.sendNavigationNativePacket(endPacket, mode: self.navigationMode, progress: self.lastNavigationProgress, note: "end_session")
+            },
+            fallbackSend: {
+                if sendSummary {
+                    self.sendText("Navigation ended")
+                }
+            }
+        )
+        navigationTransport = transport
+        navigationSessionState = .inactive
+        lastNavigationInstruction = nil
+        lastNavigationProgress = nil
+        isNavigationOverlayVisible = true
+        navigationTransport.reset(transportMode: .nativePackets)
+        navigationTransportMode = navigationTransport.transportMode
+        return result.nativeAcked || result.deliveryMode == .textFallback
+    }
+
+    public func clearNavigationTrace() {
+        navigationTraceEntries.removeAll()
+    }
+
+    public func exportNavigationTraceJSONL() -> String {
+        G1NavigationTraceExporter.jsonLines(newestFirst: navigationTraceEntries)
+    }
     
     /// Clear logs
     public func clearLogs() {
         logs.removeAll()
         events.removeAll()
         recentFrames.removeAll()
+        navigationTraceEntries.removeAll()
     }
     
     /// Try to reconnect to last known glasses
     public func reconnectToLastKnown() {
+        if !isReconnecting {
+            reconnectionAttempts = 0
+        }
+        isReconnecting = true
+
+        guard centralManager.state == .poweredOn else {
+            shouldReconnectAfterCentralRecovery = true
+            log("Reconnect deferred until Bluetooth is powered on", level: .warning)
+            return
+        }
+
         guard let leftUUIDString = UserDefaults.standard.string(forKey: Self.lastLeftUUIDKey),
               let rightUUIDString = UserDefaults.standard.string(forKey: Self.lastRightUUIDKey),
               let leftUUID = UUID(uuidString: leftUUIDString),
               let rightUUID = UUID(uuidString: rightUUIDString),
               let channel = UserDefaults.standard.string(forKey: Self.lastChannelKey) else {
+            isReconnecting = false
             log("No previously connected glasses found", level: .info)
             return
         }
@@ -774,10 +1405,10 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             isIntentionalDisconnect = false
         } else {
             log("Could not retrieve previously connected peripherals, starting scan...", level: .warning)
-            startScanning()
+            beginScanning(forReconnection: true)
         }
     }
-    
+
     // MARK: - Private Methods
 
     private enum CompatibilityCommand: String {
@@ -785,6 +1416,55 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         case headUpMode
         case dashboardVisibility
         case microphoneControl
+    }
+
+    private func sendNotificationPacketTransaction(
+        _ packets: [Data],
+        label: String,
+        retryAttempts: Int
+    ) async -> Bool {
+        guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { displayCommandGate.release() }
+
+        guard connectionState == .fullyConnected else {
+            log("Cannot send \(label.lowercased()): Not fully connected", level: .warning)
+            return false
+        }
+
+        let attempts = max(1, retryAttempts)
+        for attempt in 1...attempts {
+            var transactionSucceeded = true
+
+            for packet in packets {
+                guard !Task.isCancelled else { return false }
+                let acked = await sendCommandAwaitAck(
+                    packet,
+                    to: .left,
+                    sequence: nil,
+                    timeoutMs: max(1_000, G1BLEConstants.commandTimeoutMs)
+                )
+                if !acked {
+                    transactionSucceeded = false
+                    break
+                }
+            }
+
+            if transactionSucceeded {
+                log("\(label) sent (packets: \(packets.count))", level: .success)
+                return true
+            }
+
+            if attempt < attempts {
+                do {
+                    try await Task.sleep(for: .milliseconds(75))
+                } catch {
+                    return false
+                }
+            }
+        }
+
+        log("\(label) failed after \(attempts) attempt(s)", level: .warning)
+        return false
     }
 
     private struct CompatibilityCommandPlan {
@@ -848,23 +1528,71 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         )
         return await sendCommandAwaitAck(fallbackData, to: side, sequence: sequence, timeoutMs: timeoutMs)
     }
-    
-    private func write(_ data: Data, to peripheral: CBPeripheral?, using characteristic: CBCharacteristic?, side: GlassesSide) {
-        guard let peripheral = peripheral,
-              let characteristic = characteristic else {
-            log("Write failed [\(side.rawValue)]: No peripheral or characteristic", level: .warning)
-            return
-        }
-        
-        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-        
-        // Don't log heartbeats to avoid spam
-        if data.first != G1Command.HEARTBEAT.rawValue {
-            let hex = data.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
-            log("TX [\(side.rawValue)]: \(hex)\(data.count > 8 ? "..." : "")", level: .debug)
+
+    private func sendNavigationNativePacket(_ packet: Data,
+                                            mode: G1NavigationMode?,
+                                            progress: G1NavigationProgress?,
+                                            note: String?) async -> Bool {
+        let acked = await sendCommandAwaitAck(
+            packet,
+            to: nil,
+            sequence: nil,
+            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+        )
+
+        addNavigationTrace(
+            direction: .tx,
+            command: packet.first ?? G1CompatibilityCommand.navigationPrimary,
+            payload: Data(packet.dropFirst()),
+            mode: mode,
+            progress: progress,
+            note: note.flatMap { acked ? $0 : "\($0)_nack" }
+        )
+
+        return acked
+    }
+
+    private func addNavigationTrace(direction: G1NavigationTraceDirection,
+                                    command: UInt8,
+                                    payload: Data,
+                                    mode: G1NavigationMode?,
+                                    progress: G1NavigationProgress?,
+                                    note: String?) {
+        let payloadHex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
+        let entry = G1NavigationTraceEntry(
+            timestamp: Date(),
+            direction: direction,
+            command: command,
+            payloadHex: payloadHex,
+            mode: mode,
+            transportMode: navigationTransportMode,
+            stepIndex: progress?.stepIndex,
+            totalSteps: progress?.totalSteps,
+            remainingDistanceMeters: progress?.remainingDistanceMeters,
+            etaEpochSeconds: progress?.etaEpochSeconds,
+            note: note
+        )
+
+        navigationTraceEntries.insert(entry, at: 0)
+        if navigationTraceEntries.count > 800 {
+            navigationTraceEntries.removeLast(navigationTraceEntries.count - 800)
         }
     }
     
+    @discardableResult
+    private func write(_ data: Data,
+                       to peripheral: CBPeripheral?,
+                       using characteristic: CBCharacteristic?,
+                       side: GlassesSide) -> Bool {
+        enqueueWrite(
+            data,
+            to: peripheral,
+            using: characteristic,
+            side: side,
+            logPrefix: "TX"
+        )
+    }
+
     private func writeAndAwaitAck(_ data: Data,
                                   command: UInt8,
                                   sequence: UInt8?,
@@ -879,31 +1607,155 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         }
         
         let ackKey = AckKey(side: side, command: command, sequence: sequence)
-        
+
         return await withCheckedContinuation { continuation in
-            // Cancel and fail an older waiter if the same key is reused.
-            if let existing = pendingAcks.removeValue(forKey: ackKey) {
-                existing.timeoutTask.cancel()
-                existing.continuation.resume(returning: false)
-            }
-            
-            let timeoutTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
-                guard let self else { return }
-                if let expired = self.pendingAcks.removeValue(forKey: ackKey) {
-                    expired.continuation.resume(returning: false)
-                    self.log("ACK timeout [\(side.rawValue)] cmd=0x\(String(format: "%02X", command))", level: .warning)
+            let accepted = enqueueWrite(
+                data,
+                to: peripheral,
+                using: characteristic,
+                side: side,
+                logPrefix: "TX+ACK",
+                prepareForWrite: { [weak self] in
+                    guard let self else {
+                        continuation.resume(returning: false)
+                        return
+                    }
+
+                    // Install the waiter immediately before writeValue so a fast
+                    // response cannot race ahead of ACK registration.
+                    if let existing = self.pendingAcks.removeValue(forKey: ackKey) {
+                        existing.timeoutTask.cancel()
+                        existing.continuation.resume(returning: false)
+                    }
+
+                    let timeoutTask = Task { [weak self] in
+                        try? await Task.sleep(for: .milliseconds(max(1, timeoutMs)))
+                        guard let self else { return }
+                        if let expired = self.pendingAcks.removeValue(forKey: ackKey) {
+                            expired.continuation.resume(returning: false)
+                            self.log("ACK timeout [\(side.rawValue)] cmd=0x\(String(format: "%02X", command))", level: .warning)
+                        }
+                    }
+
+                    self.pendingAcks[ackKey] = PendingAck(
+                        timeoutTask: timeoutTask,
+                        continuation: continuation
+                    )
+                },
+                failBeforeWrite: {
+                    continuation.resume(returning: false)
                 }
-            }
-            
-            pendingAcks[ackKey] = PendingAck(timeoutTask: timeoutTask, continuation: continuation)
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            
-            if command != G1Command.HEARTBEAT.rawValue {
-                let hex = data.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
-                log("TX+ACK [\(side.rawValue)]: \(hex)\(data.count > 8 ? "..." : "")", level: .debug)
+            )
+
+            if !accepted {
+                continuation.resume(returning: false)
             }
         }
+    }
+
+    /// Enqueues one complete G1 protocol packet and drains it only while Core
+    /// Bluetooth reports available write-without-response capacity.
+    @discardableResult
+    private func enqueueWrite(_ data: Data,
+                              to peripheral: CBPeripheral?,
+                              using characteristic: CBCharacteristic?,
+                              side: GlassesSide,
+                              logPrefix: String,
+                              prepareForWrite: (() -> Void)? = nil,
+                              failBeforeWrite: (() -> Void)? = nil) -> Bool {
+        guard !data.isEmpty else {
+            log("Write failed [\(side.rawValue)]: Empty packet", level: .warning)
+            return false
+        }
+
+        guard let peripheral, let characteristic else {
+            log("Write failed [\(side.rawValue)]: No peripheral or characteristic", level: .warning)
+            return false
+        }
+
+        guard peripheral.state == .connected else {
+            log("Write failed [\(side.rawValue)]: Peripheral is not connected", level: .warning)
+            return false
+        }
+
+        guard characteristic.properties.contains(.writeWithoutResponse) else {
+            log("Write failed [\(side.rawValue)]: TX characteristic does not support write without response", level: .error)
+            return false
+        }
+
+        let maximumLength = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        guard Self.isValidWriteLength(data.count, maximumWriteLength: maximumLength) else {
+            log(
+                "Write failed [\(side.rawValue)]: Packet is \(data.count) bytes, negotiated maximum is \(maximumLength)",
+                level: .error
+            )
+            return false
+        }
+
+        let pending = PendingWrite(
+            peripheralIdentifier: peripheral.identifier,
+            data: data,
+            side: side,
+            logPrefix: logPrefix,
+            prepareForWrite: prepareForWrite,
+            failBeforeWrite: failBeforeWrite
+        )
+
+        let queuedCount = pendingWrites[side]?.count ?? 0
+        guard queuedCount < Self.maxPendingWritesPerSide else {
+            log("Write failed [\(side.rawValue)]: BLE queue reached \(Self.maxPendingWritesPerSide) packets", level: .error)
+            return false
+        }
+
+        pendingWrites[side, default: PendingWriteQueue()].append(pending)
+        drainWriteQueue(for: side)
+        return true
+    }
+
+    private func drainWriteQueue(for side: GlassesSide) {
+        guard let glasses = connectedGlasses,
+              let peripheral = glasses.peripheral(for: side),
+              let characteristic = glasses.txCharacteristic(for: side) else {
+            failQueuedWrites(for: side)
+            return
+        }
+
+        while peripheral.canSendWriteWithoutResponse,
+              let pending = pendingWrites[side]?.popFirst() {
+
+            guard pending.peripheralIdentifier == peripheral.identifier,
+                  peripheral.state == .connected else {
+                pending.failBeforeWrite?()
+                continue
+            }
+
+            pending.prepareForWrite?()
+            peripheral.writeValue(pending.data, for: characteristic, type: .withoutResponse)
+
+            if pending.data.first != G1Command.HEARTBEAT.rawValue {
+                let hex = pending.data.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
+                log(
+                    "\(pending.logPrefix) [\(side.rawValue)]: \(hex)\(pending.data.count > 8 ? "..." : "")",
+                    level: .debug
+                )
+            }
+        }
+    }
+
+    private func failQueuedWrites(for side: GlassesSide) {
+        let queued = pendingWrites[side]?.removeAll() ?? []
+        for pending in queued {
+            pending.failBeforeWrite?()
+        }
+    }
+
+    private func failAllQueuedWrites() {
+        failQueuedWrites(for: .left)
+        failQueuedWrites(for: .right)
+    }
+
+    nonisolated static func isValidWriteLength(_ byteCount: Int, maximumWriteLength: Int) -> Bool {
+        byteCount > 0 && maximumWriteLength > 0 && byteCount <= maximumWriteLength
     }
     
     private func resolvePendingAck(side: GlassesSide, command: UInt8, sequence: UInt8?, success: Bool) -> Bool {
@@ -946,13 +1798,11 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     
     private func log(_ message: String, level: LogEntry.LogLevel = .info) {
         let entry = LogEntry(timestamp: Date(), message: message, level: level)
-        
-        Task { @MainActor in
-            self.logs.append(entry)
-            // Keep last 200 logs
-            if self.logs.count > 200 {
-                self.logs.removeFirst(self.logs.count - 200)
-            }
+
+        logs.append(entry)
+        // Keep last 200 logs
+        if logs.count > 200 {
+            logs.removeFirst(logs.count - 200)
         }
         
         // Also log to system
@@ -960,20 +1810,17 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     }
     
     private func addEvent(_ event: G1Event) {
-        Task { @MainActor in
-            self.events.insert(event, at: 0)
-            if self.events.count > 50 {
-                self.events.removeLast()
-            }
+        events.insert(event, at: 0)
+        if events.count > 50 {
+            events.removeLast()
         }
+        eventRevision &+= 1
     }
     
     private func addFrame(_ frame: G1Frame) {
-        Task { @MainActor in
-            self.recentFrames.insert(frame, at: 0)
-            if self.recentFrames.count > 100 {
-                self.recentFrames.removeLast()
-            }
+        recentFrames.insert(frame, at: 0)
+        if recentFrames.count > 100 {
+            recentFrames.removeLast()
         }
     }
     
@@ -1003,59 +1850,99 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     
     private func handleServicesDiscovered(_ peripheral: CBPeripheral) {
         guard let glasses = connectedGlasses,
-              let services = peripheral.services else { return }
-        
-        let side = sideForPeripheral(peripheral)
-        glasses.setState(.discoveringCharacteristics, for: side)
-        
-        for service in services where service.uuid == G1BLEConstants.uartServiceUUID {
-            peripheral.discoverCharacteristics(
-                [G1BLEConstants.uartTXCharacteristicUUID, G1BLEConstants.uartRXCharacteristicUUID],
-                for: service
-            )
+              let services = peripheral.services,
+              let side = sideForPeripheral(peripheral) else { return }
+
+        guard let uartService = services.first(where: { $0.uuid == G1BLEConstants.uartServiceUUID }) else {
+            failPeripheralSetup(peripheral, message: "UART service not found")
+            return
         }
+
+        glasses.setState(.discoveringCharacteristics, for: side)
+        peripheral.discoverCharacteristics(
+            [G1BLEConstants.uartTXCharacteristicUUID, G1BLEConstants.uartRXCharacteristicUUID],
+            for: uartService
+        )
     }
     
     private func handleCharacteristicsDiscovered(_ peripheral: CBPeripheral, service: CBService) {
         guard let glasses = connectedGlasses,
-              let characteristics = service.characteristics else { return }
-        
-        let side = sideForPeripheral(peripheral)
-        
-        for characteristic in characteristics {
-            if characteristic.uuid == G1BLEConstants.uartRXCharacteristicUUID {
-                // Subscribe to notifications
-                peripheral.setNotifyValue(true, for: characteristic)
-                glasses.setState(.enablingNotifications, for: side)
-                log("Subscribing to RX notifications [\(side.rawValue)]", level: .debug)
-            }
-            
-            if characteristic.uuid == G1BLEConstants.uartTXCharacteristicUUID {
-                // Store TX characteristic
-                switch side {
-                case .left: glasses.leftTXCharacteristic = characteristic
-                case .right: glasses.rightTXCharacteristic = characteristic
-                }
-                log("Found TX characteristic [\(side.rawValue)]", level: .debug)
-            }
+              let characteristics = service.characteristics,
+              let side = sideForPeripheral(peripheral) else { return }
+
+        guard let rxCharacteristic = characteristics.first(where: {
+            $0.uuid == G1BLEConstants.uartRXCharacteristicUUID
+        }), let txCharacteristic = characteristics.first(where: {
+            $0.uuid == G1BLEConstants.uartTXCharacteristicUUID
+        }) else {
+            failPeripheralSetup(peripheral, message: "UART RX/TX characteristics not found")
+            return
         }
+
+        guard txCharacteristic.properties.contains(.writeWithoutResponse) else {
+            failPeripheralSetup(peripheral, message: "UART TX does not support write without response")
+            return
+        }
+
+        switch side {
+        case .left:
+            glasses.leftTXCharacteristic = txCharacteristic
+        case .right:
+            glasses.rightTXCharacteristic = txCharacteristic
+        }
+        log("Found TX characteristic [\(side.rawValue)]", level: .debug)
+
+        peripheral.setNotifyValue(true, for: rxCharacteristic)
+        glasses.setState(.enablingNotifications, for: side)
+        log("Subscribing to RX notifications [\(side.rawValue)]", level: .debug)
     }
     
     private func handleNotificationsEnabled(_ peripheral: CBPeripheral, characteristic: CBCharacteristic) {
         guard let glasses = connectedGlasses,
-              characteristic.uuid == G1BLEConstants.uartRXCharacteristicUUID else { return }
+              characteristic.uuid == G1BLEConstants.uartRXCharacteristicUUID,
+              let side = sideForPeripheral(peripheral) else { return }
         
-        let side = sideForPeripheral(peripheral)
         glasses.setState(.initializing, for: side)
         
         log("RX notifications enabled [\(side.rawValue)], sending init...", level: .info)
         
-        // Send init command: 0x4D 0x01
+        // Send init command: 0x4D 0x01 and bound the initialization phase.
         let initData = Data([G1Command.INIT.rawValue, 0x01])
-        if let txChar = glasses.txCharacteristic(for: side) {
-            peripheral.writeValue(initData, for: txChar, type: .withoutResponse)
-            log("Sent INIT command [\(side.rawValue)]", level: .debug)
+        Task { [weak self] in
+            guard let self else { return }
+            let acked = await self.sendCommandAwaitAck(
+                initData,
+                to: side,
+                sequence: nil,
+                timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
+            )
+
+            guard self.connectedGlasses?.peripheral(for: side)?.identifier == peripheral.identifier,
+                  self.connectedGlasses?.state(for: side) == .initializing else {
+                return
+            }
+
+            if acked {
+                self.handleInitAck(side: side)
+            } else {
+                self.failPeripheralSetup(peripheral, message: "Initialization ACK timed out")
+            }
         }
+    }
+
+    private func failPeripheralSetup(_ peripheral: CBPeripheral, message: String) {
+        guard let glasses = connectedGlasses,
+              let side = sideForPeripheral(peripheral) else {
+            log("Peripheral setup failed: \(message)", level: .error)
+            return
+        }
+
+        glasses.setState(.error(message), for: side)
+        cancelPendingAcks(for: side)
+        failQueuedWrites(for: side)
+        updateConnectionState()
+        log("Setup failed [\(side.rawValue)]: \(message)", level: .error)
+        centralManager.cancelPeripheralConnection(peripheral)
     }
     
     private func handleInitAck(side: GlassesSide) {
@@ -1077,6 +1964,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         
         log("🎉 Glasses fully connected!", level: .success)
         connectionState = .fullyConnected
+        stopReconnectionTimer()
+        reconnectionAttempts = 0
+        isReconnecting = false
         
         // Persist UUIDs for reconnection
         if let leftUUID = glasses.leftPeripheral?.identifier.uuidString,
@@ -1099,19 +1989,27 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     }
     
     private func handleIncomingData(_ data: Data, from peripheral: CBPeripheral) {
-        let side = sideForPeripheral(peripheral)
+        guard let side = sideForPeripheral(peripheral) else {
+            log("Ignoring data from an unknown peripheral", level: .warning)
+            return
+        }
         let frame = frameParser.parseFrame(data: data, side: side)
         routeAckIfNeeded(frame, side: side)
 
+        if navigationSessionState != .inactive,
+           frame.commandByte == G1CompatibilityCommand.navigationPrimary {
+            addNavigationTrace(
+                direction: .rx,
+                command: frame.commandByte,
+                payload: frame.payload,
+                mode: navigationMode,
+                progress: lastNavigationProgress,
+                note: "rx_\(side.rawValue.lowercased())"
+            )
+        }
+
         if frame.commandByte == G1Command.MIC_DATA.rawValue {
             handleMicrophoneFrame(frame)
-        }
-        
-        // Check for init ACK
-        if frame.commandByte == G1Command.INIT.rawValue,
-           frame.payload.first == G1Response.ACK.rawValue {
-            handleInitAck(side: side)
-            return
         }
         
         // Parse event
@@ -1264,11 +2162,13 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     }
     
     private func handlePeripheralDisconnected(_ peripheral: CBPeripheral, error: Error?) {
-        guard let glasses = connectedGlasses else { return }
+        guard let glasses = connectedGlasses,
+              let side = sideForPeripheral(peripheral) else { return }
         
-        let side = sideForPeripheral(peripheral)
         glasses.setState(.disconnected, for: side)
+        stopHeartbeat()
         cancelPendingAcks(for: side)
+        failQueuedWrites(for: side)
         
         if let error = error {
             log("Disconnected [\(side.rawValue)] with error: \(error.localizedDescription)", level: .error)
@@ -1280,12 +2180,88 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             activeMicrophoneSide = nil
             microphoneState = .failed("Active microphone side disconnected")
         }
+
+        if navigationSessionState != .inactive {
+            navigationSessionState = .inactive
+            navigationTransport.reset(transportMode: .nativePackets)
+            navigationTransportMode = navigationTransport.transportMode
+        }
         
         updateConnectionState()
         
         // Attempt reconnection if not intentional
         if !isIntentionalDisconnect && autoReconnect {
             startReconnectionTimer()
+        }
+    }
+
+    private func handlePeripheralConnectionFailure(_ peripheral: CBPeripheral, error: Error?) {
+        guard let glasses = connectedGlasses,
+              let side = sideForPeripheral(peripheral) else {
+            log(
+                "Failed to connect to \(peripheral.name ?? "Unknown"): \(error?.localizedDescription ?? "Unknown error")",
+                level: .error
+            )
+            return
+        }
+
+        glasses.setState(.disconnected, for: side)
+        cancelPendingAcks(for: side)
+        failQueuedWrites(for: side)
+        updateConnectionState()
+        log(
+            "Failed to connect [\(side.rawValue)]: \(error?.localizedDescription ?? "Unknown error")",
+            level: .error
+        )
+
+        if !isIntentionalDisconnect && autoReconnect {
+            startReconnectionTimer()
+        }
+    }
+
+    private func handleCentralStateUpdate(_ state: CBManagerState) {
+        switch state {
+        case .poweredOn:
+            log("Bluetooth powered on", level: .success)
+            if shouldReconnectAfterCentralRecovery, autoReconnect, !isIntentionalDisconnect {
+                shouldReconnectAfterCentralRecovery = false
+                startReconnectionTimer()
+            }
+
+        case .poweredOff, .resetting:
+            log(state == .poweredOff ? "Bluetooth powered off" : "Bluetooth resetting", level: .warning)
+            shouldReconnectAfterCentralRecovery = connectedGlasses != nil && autoReconnect && !isIntentionalDisconnect
+            isScanning = false
+            stopHeartbeat()
+            cancelAllPendingAcks()
+            failAllQueuedWrites()
+            connectedGlasses?.leftState = .disconnected
+            connectedGlasses?.rightState = .disconnected
+            connectionState = .disconnected
+
+        case .unauthorized:
+            log("Bluetooth unauthorized", level: .error)
+            shouldReconnectAfterCentralRecovery = false
+            isScanning = false
+            stopHeartbeat()
+            cancelAllPendingAcks()
+            failAllQueuedWrites()
+            connectionState = .disconnected
+
+        case .unsupported:
+            log("Bluetooth unsupported", level: .error)
+            shouldReconnectAfterCentralRecovery = false
+            isScanning = false
+            stopHeartbeat()
+            cancelAllPendingAcks()
+            failAllQueuedWrites()
+            connectionState = .disconnected
+
+        case .unknown:
+            log("Bluetooth state unknown", level: .warning)
+
+        @unknown default:
+            log("Bluetooth state: \(state.rawValue)", level: .warning)
         }
     }
     
@@ -1297,11 +2273,14 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         connectionState = glasses.overallState
     }
     
-    private func sideForPeripheral(_ peripheral: CBPeripheral) -> GlassesSide {
+    private func sideForPeripheral(_ peripheral: CBPeripheral) -> GlassesSide? {
         if peripheral.identifier == connectedGlasses?.leftPeripheral?.identifier {
             return .left
         }
-        return .right
+        if peripheral.identifier == connectedGlasses?.rightPeripheral?.identifier {
+            return .right
+        }
+        return nil
     }
     
     // MARK: - Heartbeat
@@ -1312,17 +2291,22 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     
     private func startHeartbeat() {
         stopHeartbeat()
-        
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: G1BLEConstants.heartbeatInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(G1BLEConstants.heartbeatInterval))
+                } catch {
+                    break
+                }
                 await self?.sendHeartbeat()
             }
         }
     }
     
     private func stopHeartbeat() {
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
         missedHeartbeatAcks = 0
     }
     
@@ -1363,33 +2347,42 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     // MARK: - Reconnection
     
     private func startReconnectionTimer() {
+        guard centralManager.state == .poweredOn else {
+            shouldReconnectAfterCentralRecovery = true
+            return
+        }
+
         guard reconnectionAttempts < G1BLEConstants.maxReconnectionAttempts else {
+            isReconnecting = false
             log("Max reconnection attempts reached", level: .error)
             return
         }
-        
-        stopReconnectionTimer()
+
+        // Both arms often report the same outage independently. One timer is
+        // sufficient and avoids consuming two retry attempts for one event.
+        guard reconnectionTask == nil else { return }
         
         reconnectionAttempts += 1
+        isReconnecting = true
         log("Scheduling reconnection attempt \(reconnectionAttempts)/\(G1BLEConstants.maxReconnectionAttempts)...", level: .info)
         
-        let timer = DispatchSource.makeTimerSource(queue: bleQueue)
-        timer.schedule(deadline: .now() + G1BLEConstants.reconnectionDelay)
-        timer.setEventHandler { [weak self] in
-            Task { @MainActor in
-                self?.attemptReconnection()
+        reconnectionTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(G1BLEConstants.reconnectionDelay))
+            } catch {
+                return
             }
+            self?.attemptReconnection()
         }
-        reconnectionTimer = timer
-        timer.resume()
     }
     
     private func stopReconnectionTimer() {
-        reconnectionTimer?.cancel()
-        reconnectionTimer = nil
+        reconnectionTask?.cancel()
+        reconnectionTask = nil
     }
     
     private func attemptReconnection() {
+        stopReconnectionTimer()
         log("Attempting reconnection...", level: .info)
         reconnectToLastKnown()
     }
@@ -1429,6 +2422,13 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
         if pair.isComplete {
             log("Complete pair found for \(pair.displayName)!", level: .success)
+
+            if isReconnecting, isScanning,
+               let lastChannel = UserDefaults.standard.string(forKey: Self.lastChannelKey),
+               pair.channel == lastChannel {
+                log("Recovered the last known pair during scan; reconnecting...", level: .info)
+                connect(to: pair, forReconnection: true)
+            }
         }
     }
     
@@ -1624,130 +2624,96 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
 // MARK: - CBCentralManagerDelegate
 
-extension G1BluetoothManager: CBCentralManagerDelegate {
-    
-    nonisolated public func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        Task { @MainActor in
-            switch central.state {
-            case .poweredOn:
-                self.log("Bluetooth powered on", level: .success)
-            case .poweredOff:
-                self.log("Bluetooth powered off", level: .warning)
-                self.connectionState = .disconnected
-            case .unauthorized:
-                self.log("Bluetooth unauthorized", level: .error)
-            case .unsupported:
-                self.log("Bluetooth unsupported", level: .error)
-            case .resetting:
-                self.log("Bluetooth resetting", level: .warning)
-            case .unknown:
-                self.log("Bluetooth state unknown", level: .warning)
-            @unknown default:
-                self.log("Bluetooth state: \(central.state.rawValue)", level: .warning)
-            }
-        }
+extension G1BluetoothManager: @preconcurrency CBCentralManagerDelegate {
+
+    /// Core Bluetooth is initialized with a nil delegate queue, so Apple
+    /// guarantees these callbacks arrive on the main dispatch queue.
+    public func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        handleCentralStateUpdate(central.state)
     }
     
-    nonisolated public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
-                                           advertisementData: [String: Any], rssi RSSI: NSNumber) {
+    public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
+                               advertisementData: [String: Any], rssi RSSI: NSNumber) {
         let evaluation = Self.evaluateDiscovery(
             localName: Self.advertisedLocalName(from: advertisementData),
             peripheralName: peripheral.name,
             hasUARTService: Self.hasUARTService(in: advertisementData)
         )
-        
-        Task { @MainActor in
-            self.ingestDiscoveredPeripheral(peripheral, evaluation: evaluation)
-        }
+        ingestDiscoveredPeripheral(peripheral, evaluation: evaluation)
     }
     
-    nonisolated public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        Task { @MainActor in
-            self.handlePeripheralConnected(peripheral)
-        }
+    public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        handlePeripheralConnected(peripheral)
     }
     
-    nonisolated public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
-                                           error: Error?) {
-        Task { @MainActor in
-            self.handlePeripheralDisconnected(peripheral, error: error)
-        }
+    public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
+                               error: Error?) {
+        handlePeripheralDisconnected(peripheral, error: error)
     }
     
-    nonisolated public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral,
-                                           error: Error?) {
-        Task { @MainActor in
-            let name = peripheral.name ?? "Unknown"
-            self.log("Failed to connect to \(name): \(error?.localizedDescription ?? "Unknown error")", level: .error)
-        }
+    public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral,
+                               error: Error?) {
+        handlePeripheralConnectionFailure(peripheral, error: error)
     }
 }
 
 // MARK: - CBPeripheralDelegate
 
-extension G1BluetoothManager: CBPeripheralDelegate {
+extension G1BluetoothManager: @preconcurrency CBPeripheralDelegate {
     
-    nonisolated public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        if let error = error {
-            Task { @MainActor in
-                self.log("Service discovery error: \(error.localizedDescription)", level: .error)
-            }
+    public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        if let error {
+            failPeripheralSetup(peripheral, message: "Service discovery: \(error.localizedDescription)")
             return
         }
-        
-        Task { @MainActor in
-            self.handleServicesDiscovered(peripheral)
-        }
+        handleServicesDiscovered(peripheral)
     }
     
-    nonisolated public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
-                                       error: Error?) {
-        if let error = error {
-            Task { @MainActor in
-                self.log("Characteristic discovery error: \(error.localizedDescription)", level: .error)
-            }
+    public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
+                           error: Error?) {
+        if let error {
+            failPeripheralSetup(peripheral, message: "Characteristic discovery: \(error.localizedDescription)")
             return
         }
-        
-        Task { @MainActor in
-            self.handleCharacteristicsDiscovered(peripheral, service: service)
-        }
+        handleCharacteristicsDiscovered(peripheral, service: service)
     }
     
-    nonisolated public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
-                                       error: Error?) {
-        if let error = error {
-            Task { @MainActor in
-                self.log("Notification state error: \(error.localizedDescription)", level: .error)
-            }
+    public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                           error: Error?) {
+        if let error {
+            failPeripheralSetup(peripheral, message: "Notification subscription: \(error.localizedDescription)")
             return
         }
-        
+
         if characteristic.isNotifying {
-            Task { @MainActor in
-                self.handleNotificationsEnabled(peripheral, characteristic: characteristic)
-            }
+            handleNotificationsEnabled(peripheral, characteristic: characteristic)
+        } else if characteristic.uuid == G1BLEConstants.uartRXCharacteristicUUID {
+            failPeripheralSetup(peripheral, message: "UART RX notifications were not enabled")
         }
     }
     
-    nonisolated public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
-                                       error: Error?) {
-        guard error == nil,
-              let data = characteristic.value,
-              !data.isEmpty else { return }
-        
-        Task { @MainActor in
-            self.handleIncomingData(data, from: peripheral)
+    public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
+                           error: Error?) {
+        if let error {
+            let side = sideForPeripheral(peripheral)?.rawValue ?? "?"
+            log("Notification error [\(side)]: \(error.localizedDescription)", level: .error)
+            return
         }
+
+        guard let data = characteristic.value, !data.isEmpty else { return }
+        handleIncomingData(data, from: peripheral)
     }
     
-    nonisolated public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic,
-                                       error: Error?) {
-        if let error = error {
-            Task { @MainActor in
-                let side = self.sideForPeripheral(peripheral)
-                self.log("Write error [\(side.rawValue)]: \(error.localizedDescription)", level: .error)
-            }
+    public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic,
+                           error: Error?) {
+        if let error {
+            let side = sideForPeripheral(peripheral)?.rawValue ?? "?"
+            log("Write error [\(side)]: \(error.localizedDescription)", level: .error)
         }
+    }
+
+    public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        guard let side = sideForPeripheral(peripheral) else { return }
+        drainWriteQueue(for: side)
     }
 }

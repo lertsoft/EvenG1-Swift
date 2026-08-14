@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
@@ -14,19 +14,29 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.29.0")
+        .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.38.1")
     ],
     targets: [
         .target(
+            name: "CLibLC3",
+            path: "Sources/CLibLC3",
+            exclude: ["LICENSE", "UPSTREAM.md"],
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath(".")
+            ]
+        ),
+        .target(
             name: "EvenG1Core",
             dependencies: [
+                "CLibLC3",
                 .product(name: "SwiftProtobuf", package: "swift-protobuf")
             ],
             path: "Sources/EvenG1Core"
         ),
         .testTarget(
             name: "EvenG1CoreTests",
-            dependencies: ["EvenG1Core"],
+            dependencies: ["EvenG1Core", "CLibLC3"],
             path: "Tests/EvenG1CoreTests"
         )
     ]

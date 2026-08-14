@@ -84,6 +84,7 @@ public enum G1Event: Sendable {
 
 /// Parses incoming BLE data from the glasses
 public final class G1FrameParser: @unchecked Sendable {
+    private static let noisyVendorCommands: Set<UInt8> = [0x29, 0x2B]
     
     /// Configuration for which frames to filter
     public struct FilterConfig: Sendable {
@@ -116,6 +117,9 @@ public final class G1FrameParser: @unchecked Sendable {
     /// Parse a frame into a higher-level event
     public func parseEvent(from frame: G1Frame) -> G1Event? {
         guard let command = G1Command(rawValue: frame.commandByte) else {
+            if Self.noisyVendorCommands.contains(frame.commandByte), !filterConfig.verboseLogging {
+                return nil
+            }
             return unknownEvent(command: frame.commandByte, payload: frame.payload)
         }
         
@@ -150,6 +154,12 @@ public final class G1FrameParser: @unchecked Sendable {
 
         case .HEARTBEAT:
             // Heartbeat response - typically filtered
+            return nil
+
+        case .HEAD_UP_ANGLE, .DASHBOARD_LAYOUT, .DASHBOARD_SHOW, .DISPLAY_SETTINGS:
+            // ACK-only control families. 0x0A is also used by the app's
+            // experimental, hardware-gated navigation transport.
+            // ACK handling happens in Bluetooth manager routing.
             return nil
             
         default:

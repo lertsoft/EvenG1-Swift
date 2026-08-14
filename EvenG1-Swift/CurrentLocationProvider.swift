@@ -1,6 +1,7 @@
 import CoreLocation
 import Foundation
 
+@MainActor
 protocol LocationProviding {
     func requestOneShotLocation() async throws -> CLLocationCoordinate2D
 }
@@ -13,6 +14,7 @@ enum CurrentLocationError: Error {
     case underlying(String)
 }
 
+@MainActor
 final class CurrentLocationProvider: NSObject, LocationProviding, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
     private var continuation: CheckedContinuation<CLLocationCoordinate2D, Error>?
@@ -25,19 +27,33 @@ final class CurrentLocationProvider: NSObject, LocationProviding, CLLocationMana
     }
 
     func requestOneShotLocation() async throws -> CLLocationCoordinate2D {
-        let status = manager.authorizationStatus
-        return try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
+        guard CLLocationManager.locationServicesEnabled() else {
+            throw CurrentLocationError.servicesDisabled
+        }
 
-            switch status {
-            case .denied, .restricted:
-                self.resolve(.failure(CurrentLocationError.deniedOrRestricted))
-            case .authorizedAlways, .authorizedWhenInUse:
-                self.startLocationRequest()
-            case .notDetermined:
-                self.manager.requestWhenInUseAuthorization()
-            @unknown default:
-                self.resolve(.failure(CurrentLocationError.deniedOrRestricted))
+        guard continuation == nil else {
+            throw CurrentLocationError.underlying("Another location request is already in progress.")
+        }
+
+        let status = manager.authorizationStatus
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+
+                switch status {
+                case .denied, .restricted:
+                    self.resolve(.failure(CurrentLocationError.deniedOrRestricted))
+                case .authorizedAlways, .authorizedWhenInUse:
+                    self.startLocationRequest()
+                case .notDetermined:
+                    self.manager.requestWhenInUseAuthorization()
+                @unknown default:
+                    self.resolve(.failure(CurrentLocationError.deniedOrRestricted))
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelPendingRequest()
             }
         }
     }
@@ -47,12 +63,18 @@ final class CurrentLocationProvider: NSObject, LocationProviding, CLLocationMana
         manager.requestLocation()
 
         timeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 15 * 1_000_000_000)
-            guard let self else { return }
-            guard let continuation = self.continuation else { return }
-            self.continuation = nil
-            continuation.resume(throwing: CurrentLocationError.timeout)
+            do {
+                try await Task.sleep(for: .seconds(15))
+            } catch {
+                return
+            }
+            self?.resolve(.failure(CurrentLocationError.timeout))
         }
+    }
+
+    private func cancelPendingRequest() {
+        manager.stopUpdatingLocation()
+        resolve(.failure(CancellationError()))
     }
 
     private func resolve(_ result: Result<CLLocationCoordinate2D, Error>) {
@@ -102,11 +124,15 @@ final class CurrentLocationProvider: NSObject, LocationProviding, CLLocationMana
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let coordinate = locations.last?.coordinate else {
+        let freshnessThreshold: TimeInterval = 60
+        guard let location = locations.last(where: {
+            $0.horizontalAccuracy >= 0
+                && abs($0.timestamp.timeIntervalSinceNow) <= freshnessThreshold
+        }) else {
             resolve(.failure(CurrentLocationError.noLocation))
             return
         }
 
-        resolve(.success(coordinate))
+        resolve(.success(location.coordinate))
     }
 }

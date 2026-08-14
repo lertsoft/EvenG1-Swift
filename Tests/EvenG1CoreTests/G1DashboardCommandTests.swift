@@ -14,10 +14,20 @@ final class G1DashboardCommandTests: XCTestCase {
         XCTAssertEqual(G1BluetoothManager.dashboardVisibilityPayload(visible: false), [0x00])
     }
 
+    func testDisplayPositionPacketMatchesVendorLayoutAndClampsValues() {
+        let settings = G1DisplayPositionSettings(enabled: true, height: 20, distance: -2)
+        XCTAssertEqual(settings.height, 8)
+        XCTAssertEqual(settings.distance, 0)
+
+        let packet = G1DisplaySettingsPacketBuilder.positionPacket(settings: settings, sequence: 0x2A)
+        XCTAssertEqual(packet, Data([0x26, 0x08, 0x00, 0x2A, 0x02, 0x01, 0x08, 0x01]))
+    }
+
     func testAckRoutingIncludesDashboardAndHeadUpCommands() {
         XCTAssertTrue(G1BluetoothManager.routesAck(for: G1CompatibilityCommand.dashboardVisibility))
         XCTAssertTrue(G1BluetoothManager.routesAck(for: G1CompatibilityCommand.headUpMode))
         XCTAssertTrue(G1BluetoothManager.routesAck(for: G1CompatibilityCommand.headUpModeAlt))
+        XCTAssertTrue(G1BluetoothManager.routesAck(for: G1Command.DISPLAY_SETTINGS.rawValue))
     }
 
     func testFallbackVisibilityRequiresStateChange() {

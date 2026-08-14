@@ -1,41 +1,76 @@
-# Even G1 Reverse Engineering App
+# EvenG1 Swift
 
-This repo is a work in progress attempt at building my own [Even Relaities G1](https://www.evenrealities.com/g1) smart glasses app. I am reverse engineering the Even G1 protocolto understand how they work and build my own app with my own UX and features.
+An experimental native Swift app for understanding and extending the Even Realities G1 smart-glasses protocol. The project connects to both glasses arms over Bluetooth Low Energy, displays text and 1-bit bitmap content, sends vendor-formatted test notifications, handles microphone and gesture events, shows nearby NYC subway arrivals, and provides phone-driven navigation guidance with a text fallback for unverified native navigation packets.
 
-## Repos that were helpful
+This is a reverse-engineering project, not an official Even Realities product. Protocol behavior can vary by firmware; validate experimental commands on hardware before relying on them.
 
-1. [`EvenDemoApp-main`](https://github.com/even-realities/EvenDemoApp) - Flutter demo from Even Realities themselves with protocol examples
-2. `fahrplan-main` - community reverse-engineered app with many working flows
-3. [`MentraOS-main`](https://github.com/Mentra-Community/MentraOS) -  A big Open Source smart-glasses platform and OS with active G1 iOS/Android implementations
+## Requirements
 
-## Quick Architecture Summary
+- Xcode 26.2 or newer
+- iOS 17.6 or newer
+- Swift 6.2 toolchain (included with Xcode 26.2)
+- A physical iPhone for Bluetooth and glasses validation
 
-- G1 is dual-radio BLE: one left arm and one right arm.
-- Most commands are sent to both sides; some are right-only (mic control is commonly right-side in real implementations).
-- BLE transport is Nordic UART service:
-  - Service: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
-  - TX (write): `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`
-  - RX (notify): `6E400003-B5A3-F393-E0A9-E50E24DCCA9E`
-- Core ACKs:
-  - `0xC9` success
-  - `0xCA` failure
-  - `0xCB` continue (seen in some flows like whitelist)
+## Setup
 
-## Key Protocol Flows Confirmed Across Repos
+1. Clone the repository and open `EvenG1-Swift.xcodeproj`.
+2. Select your Apple development team and an iPhone destination, then run the `EvenG1-Swift` scheme.
 
-- Init: `0x4D 0x01`
-- Heartbeat: two observed patterns:
-  - Short pattern: `0x25 <seq>` (Mentra iOS)
-  - Extended pattern: `0x25 0x06 0x00 <seq> 0x04 <seq>` (EvenDemo/Fahrplan style)
-- Battery: request `0x2C 0x01`, response includes battery percent (commonly `2C 66 <percent> ...`)
-- Text/AI display: `0x4E` packets with header fields for sequence, page and display state
-- Mic control: `0x0E 0x01` on, `0x0E 0x00` off
-- Mic audio stream from glasses: `0xF1`
-- Device events from glasses: `0xF5` subcommands (touch, case, AI trigger, etc.)
-- Bitmap upload flow:
-  1) stream chunks with `0x15` (first chunk includes address bytes `00 1C 00 00`)
-  2) end with `0x20 0D 0E`
-  3) CRC check with `0x16 <crc32-xz>`
-- Notifications:
-  - setup/allowlist via `0x04` JSON chunking
-  - push notification payload via `0x4B` JSON chunking
+MTA's current public subway and service-alert GTFS-Realtime feeds do not
+require an API key. The app therefore works without embedding a credential in
+its bundle.
+
+The app requests Bluetooth and when-in-use location access. The Simulator is useful for compilation and UI work, but Core Bluetooth behavior must be tested on a physical device.
+
+The bundled privacy manifest declares app-only `UserDefaults` usage under
+Apple's approved `CA92.1` reason. The app does not use tracking domains or an
+advertising identifier, and it does not send analytics to a developer-operated
+service.
+
+## Verification
+
+Run the core package tests:
+
+```sh
+swift test
+```
+
+Build the iOS app without code signing:
+
+```sh
+xcodebuild \
+  -project EvenG1-Swift.xcodeproj \
+  -scheme EvenG1-Swift \
+  -configuration Debug \
+  -sdk iphonesimulator \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
+
+## Architecture
+
+- `Sources/EvenG1Core`: reusable Bluetooth, protocol, bitmap, notification, navigation-transport, and MTA GTFS-Realtime logic.
+- `Sources/CLibLC3`: vendored Google liblc3 1.1.3 decoder source (Apache-2.0) used for the G1 microphone's native 20-byte LC3 frames.
+- `EvenG1-Swift`: SwiftUI application, location/search/routing integration, station preferences, bitmap rendering, and microphone audio pipeline.
+- `Tests/EvenG1CoreTests`: deterministic protocol, transport fallback, GTFS parsing, station-cache, and transit-selection tests.
+- Navigate's waveform diagnostics sheet previews the current transport/session
+  state and exports bounded navigation traces as chronological `.jsonl` evidence.
+- `RESEARCH`: protocol evidence, unresolved assumptions, and the physical-device navigation validation matrix.
+
+The G1 uses two BLE peripherals, one per arm, over the Nordic UART service. Commands normally flow to the left arm and then the right after acknowledgment. Explicitly side-specific operations, such as microphone activation, use the documented side-specific path first.
+
+## Reference documentation
+
+- [Even Realities EvenDemoApp](https://github.com/even-realities/EvenDemoApp) for the vendor-published G1 protocol examples, including text, bitmap, microphone, and dual-arm ordering
+- [Google liblc3](https://github.com/google/liblc3) for the maintained Apache-2.0 LC3 codec implementation used by the microphone playback pipeline
+- [EvenDemoApp display-settings guidance](https://github.com/even-realities/EvenDemoApp/issues/33) for the `0x26` raster height/distance packet
+- [Apple Core Bluetooth](https://developer.apple.com/documentation/corebluetooth) for discovery, connection, privacy, and lifecycle requirements
+- [Apple MapKit](https://developer.apple.com/documentation/mapkit) for search, routing, overlays, and map items
+- [Apple Core Location](https://developer.apple.com/documentation/corelocation) for authorization and location updates
+- [Apple privacy manifest documentation](https://developer.apple.com/documentation/bundleresources/privacy-manifest-files) for required-reason API declarations
+- [MTA developer resources](https://www.mta.info/developers), [MTA GTFS documentation](https://github.com/nymta/gtfs-documentation), and the official [MTA Subway Stations dataset](https://data.ny.gov/Transportation/MTA-Subway-Stations/39hk-dx4f/about_data)
+- [Socrata paging documentation](https://dev.socrata.com/docs/paging.html) for explicit Open Data query ordering and limits
+- [GTFS Realtime reference](https://gtfs.org/documentation/realtime/reference/) and [SwiftProtobuf](https://github.com/apple/swift-protobuf)
+
+See `RESEARCH/PROTOCOL_NOTES.md` for byte-level notes and `RESEARCH/NAVIGATION_VALIDATION_MATRIX.md` for the remaining hardware checks.

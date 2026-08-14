@@ -1,5 +1,6 @@
 import SwiftUI
 import EvenG1Core
+import CoreLocation
 
 struct ContentView: View {
     @EnvironmentObject var bluetoothManager: G1BluetoothManager
@@ -12,18 +13,24 @@ struct ContentView: View {
                     Label("Connect", systemImage: "eyeglasses")
                 }
                 .tag(0)
+
+            NavigateTab(isActive: selectedTab == 1)
+                .tabItem {
+                    Label("Navigate", systemImage: "map")
+                }
+                .tag(1)
             
-            DisplayTab(isActive: selectedTab == 1)
+            DisplayTab(isActive: selectedTab == 2)
                 .tabItem {
                     Label("Display", systemImage: "text.bubble")
                 }
-                .tag(1)
+                .tag(2)
             
             LogsTab()
                 .tabItem {
                     Label("Logs", systemImage: "doc.text")
                 }
-                .tag(2)
+                .tag(3)
         }
         .tint(.cyan)
     }
@@ -338,17 +345,35 @@ struct QuickActionButton: View {
 
 // MARK: - Display Tab
 
+private enum MTAStationPickerPurpose: String, Identifiable {
+    case lockStation
+    case stationPreference
+
+    var id: String { rawValue }
+}
+
 struct DisplayTab: View {
     @EnvironmentObject var bluetoothManager: G1BluetoothManager
     let isActive: Bool
 
     @State private var textToSend = ""
+    @State private var notificationTitle = "EvenG1 Swift"
+    @State private var notificationMessage = "This is a test notification."
+    @State private var notificationStatus = "Not sent"
+    @State private var isNotificationSending = false
     @State private var brightnessValue: Double = 50
     @State private var tiltDashboardEnabled = false
     @State private var tiltHeadUpMode: G1HeadUpMode = .dashboard
     @State private var tiltAppEventFallback = true
+    @State private var displayPositionEnabled = true
+    @State private var displayHeight = 4
+    @State private var displayDistance = 4
     @StateObject private var mtaViewModel = MTATrainViewModel()
+    @StateObject private var stationPickerViewModel = MTAStationPickerViewModel()
     @StateObject private var micAudioPipeline = G1MicrophoneAudioPipeline()
+    @State private var stationPickerPurpose: MTAStationPickerPurpose?
+    @State private var pendingPreferenceMode: MTADirectionPreferenceMode = .both
+    @State private var showPreferenceModeDialog = false
     @FocusState private var isTextFieldFocused: Bool
     
     var body: some View {
@@ -442,15 +467,101 @@ struct DisplayTab: View {
                 }
                 .disabled(bluetoothManager.connectionState != .fullyConnected)
 
+                Section("Notification Transport") {
+                    TextField("Title", text: $notificationTitle)
+                        .focused($isTextFieldFocused)
+                        .accessibilityIdentifier("display.notificationTitleField")
+
+                    TextField("Message", text: $notificationMessage, axis: .vertical)
+                        .lineLimit(2...4)
+                        .focused($isTextFieldFocused)
+                        .accessibilityIdentifier("display.notificationMessageField")
+
+                    Button {
+                        Task {
+                            await sendTestNotification()
+                        }
+                    } label: {
+                        if isNotificationSending {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text("Sending...")
+                            }
+                        } else {
+                            Label("Configure & Send Test", systemImage: "bell.badge")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("display.notificationSendButton")
+                    .disabled(
+                        bluetoothManager.connectionState != .fullyConnected ||
+                        notificationTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        notificationMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        isNotificationSending
+                    )
+
+                    Text(notificationStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("display.notificationStatus")
+
+                    Text("Exercises the vendor 0x04 whitelist and 0x4B notification APIs. iOS does not allow apps to read other apps' Notification Center content, so this is an explicit app-generated test.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("MTA Next Train") {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(mtaViewModel.statusTitle)
+                        Text(mtaViewModel.nearestStationName)
                             .font(.headline)
                             .accessibilityIdentifier("mta.statusLabel")
+
+                        Text(mtaViewModel.lockStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Text("\(mtaViewModel.visualPageIndexText) • \(mtaViewModel.bitmapDeliveryStatus)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+
+                        if !mtaViewModel.upcomingTrains.isEmpty {
+                            ForEach(mtaViewModel.upcomingTrains) { train in
+                                HStack {
+                                    Text("\(train.routeID) \(mtaDirectionDualLabel(for: train.direction))")
+                                        .font(.subheadline)
+                                    Spacer()
+                                    Text("\(train.minutesAway)m")
+                                        .font(.subheadline.bold())
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        }
 
                         Text(mtaViewModel.statusDetail)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("mta.statusDetailLabel")
+
+                        if let topAlertSummary = mtaViewModel.topAlertSummary {
+                            Text("Alert: \(topAlertSummary)")
+                                .font(.subheadline)
+                                .foregroundStyle(.orange)
+                                .accessibilityIdentifier("mta.alertSummaryLabel")
+
+                            if mtaViewModel.additionalAlertCount > 0 {
+                                Text("+\(mtaViewModel.additionalAlertCount) more active alerts")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("mta.alertCountLabel")
+                            }
+                        }
+
+                        if mtaViewModel.alertsUnavailable {
+                            Text("Service alerts are temporarily unavailable. Train arrival data is still live.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("mta.alertUnavailableLabel")
+                        }
 
                         if let lastUpdatedAt = mtaViewModel.lastUpdatedAt {
                             Text("Updated \(lastUpdatedAt.formatted(.dateTime.hour().minute().second()))")
@@ -491,12 +602,80 @@ struct DisplayTab: View {
                     .accessibilityIdentifier("mta.autoRefreshToggle")
                     .disabled(mtaViewModel.isRefreshing)
 
+                    Picker(
+                        "Current Station Mode",
+                        selection: Binding(
+                            get: { mtaViewModel.currentStationPreferenceMode },
+                            set: { mode in
+                                Task {
+                                    await mtaViewModel.setCurrentStationPreferenceMode(mode)
+                                }
+                            }
+                        )
+                    ) {
+                        ForEach(MTADirectionPreferenceMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(mtaViewModel.selectedStation == nil)
+
+                    HStack(spacing: 10) {
+                        Button("Lock Nearest") {
+                            mtaViewModel.lockToNearestStation()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(mtaViewModel.selectedStation == nil)
+
+                        Button("Pick Lock") {
+                            stationPickerPurpose = .lockStation
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Unlock") {
+                            mtaViewModel.clearManualLock()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(mtaViewModel.lockedStation == nil)
+                    }
+
+                    Button("Set Preference For Station") {
+                        showPreferenceModeDialog = true
+                    }
+                    .buttonStyle(.bordered)
+
+                    if !mtaViewModel.savedDirectionPreferences.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Saved Preferences")
+                                .font(.subheadline.weight(.semibold))
+
+                            ForEach(mtaViewModel.savedDirectionPreferences) { preference in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(preference.stationName)
+                                            .font(.caption)
+                                        Text("\(preference.stationID) • \(preference.mode.displayName)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Button(role: .destructive) {
+                                        mtaViewModel.removePreference(id: preference.id)
+                                    } label: {
+                                        Image(systemName: "trash")
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                            }
+                        }
+                    }
+
                     if bluetoothManager.connectionState != .fullyConnected {
                         Text("Results still appear in-app. Connect glasses to mirror updates.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        Text("Double-tap or head-up gesture refreshes instantly.")
+                        Text("Double-tap/head-up refresh. Swipe forward/back pages. Stem wording is shown on-glasses.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -544,6 +723,34 @@ struct DisplayTab: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Display Position") {
+                    Toggle("Enable Raster", isOn: $displayPositionEnabled)
+                        .accessibilityIdentifier("display.positionEnabled")
+
+                    Stepper("Height: \(displayHeight)", value: $displayHeight, in: 0...8)
+                        .accessibilityIdentifier("display.positionHeight")
+                    Stepper("Eye Distance: \(displayDistance)", value: $displayDistance, in: 0...8)
+                        .accessibilityIdentifier("display.positionDistance")
+
+                    Button("Apply Position") {
+                        Task {
+                            let settings = G1DisplayPositionSettings(
+                                enabled: displayPositionEnabled,
+                                height: displayHeight,
+                                distance: displayDistance
+                            )
+                            _ = await bluetoothManager.setDisplayPosition(settings)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("display.positionApply")
+
+                    Text("Uses the vendor 0x26 raster-position command. Height and eye distance range from 0 to 8.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .disabled(bluetoothManager.connectionState != .fullyConnected)
+
                 Section("Microphone") {
                     LabeledContent("State") {
                         Text(bluetoothManager.microphoneState.displayName)
@@ -580,20 +787,6 @@ struct DisplayTab: View {
                     }
                     .disabled(!micAudioPipeline.isPlaybackEnabled)
 
-                    Toggle("Auto LC3 Frame Size", isOn: $micAudioPipeline.lc3AutoFrameSize)
-                        .disabled(!micAudioPipeline.isPlaybackEnabled || micAudioPipeline.decoderMode != .lc3_16k_20b)
-
-                    Picker("LC3 Frame Size", selection: $micAudioPipeline.lc3FrameSize) {
-                        ForEach(G1MicrophoneAudioPipeline.LC3FrameSize.allCases) { frameSize in
-                            Text(frameSize.displayName).tag(frameSize)
-                        }
-                    }
-                    .disabled(
-                        !micAudioPipeline.isPlaybackEnabled ||
-                        micAudioPipeline.decoderMode != .lc3_16k_20b ||
-                        micAudioPipeline.lc3AutoFrameSize
-                    )
-
                     Stepper(
                         "Playback Rate: \(Int(micAudioPipeline.sampleRate)) Hz",
                         value: $micAudioPipeline.sampleRate,
@@ -613,11 +806,16 @@ struct DisplayTab: View {
                     }
 
                     LabeledContent("Active LC3 Frame") {
-                        Text("\(micAudioPipeline.activeLC3FrameBytes) bytes")
-                            .monospacedDigit()
+                        if micAudioPipeline.activeLC3FrameBytes > 0 {
+                            Text("\(micAudioPipeline.activeLC3FrameBytes) bytes")
+                                .monospacedDigit()
+                        } else {
+                            Text("-")
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
-                    Text("Use LC3 mode for glasses microphone playback. PCM modes are for protocol experimentation.")
+                    Text("G1 microphone audio is decoded as vendor-specified 20-byte LC3 frames at 16 kHz. PCM modes remain available only for protocol diagnostics.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -695,6 +893,7 @@ struct DisplayTab: View {
                 mtaViewModel.bind(bluetoothManager: bluetoothManager)
                 mtaViewModel.setDisplayTabActive(isActive)
                 syncTiltDashboardFormState()
+                syncDisplayPositionFormState()
                 micAudioPipeline.bind(to: bluetoothManager)
             }
             .onDisappear {
@@ -706,14 +905,47 @@ struct DisplayTab: View {
             .onChange(of: bluetoothManager.tiltDashboardConfig) { _, _ in
                 syncTiltDashboardFormState()
             }
-            .onChange(of: bluetoothManager.events.count) { oldValue, newValue in
-                guard newValue > oldValue, let latestEvent = bluetoothManager.events.first else {
+            .onChange(of: bluetoothManager.displayPositionSettings) { _, _ in
+                syncDisplayPositionFormState()
+            }
+            .onChange(of: bluetoothManager.eventRevision) { _, _ in
+                guard let latestEvent = bluetoothManager.events.first else {
                     return
                 }
 
                 Task {
                     await mtaViewModel.handleGlassesEvent(latestEvent)
                 }
+            }
+            .sheet(item: $stationPickerPurpose) { purpose in
+                MTAStationPickerSheet(
+                    title: purpose == .lockStation ? "Pick Lock Station" : "Pick Station For Preference",
+                    pickerViewModel: stationPickerViewModel,
+                    userCoordinate: mtaViewModel.currentUserCoordinate(),
+                    onSelect: { station in
+                        switch purpose {
+                        case .lockStation:
+                            mtaViewModel.lockToStation(station)
+                        case .stationPreference:
+                            mtaViewModel.setPreferenceMode(pendingPreferenceMode, for: station)
+                        }
+                    }
+                )
+            }
+            .confirmationDialog(
+                "Choose Direction Preference",
+                isPresented: $showPreferenceModeDialog,
+                titleVisibility: .visible
+            ) {
+                ForEach(MTADirectionPreferenceMode.allCases) { mode in
+                    Button(mode.displayName) {
+                        pendingPreferenceMode = mode
+                        stationPickerPurpose = .stationPreference
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Select preference mode, then pick a station.")
             }
         }
     }
@@ -746,6 +978,39 @@ struct DisplayTab: View {
         tiltAppEventFallback = config.appEventFallback
     }
 
+    private func sendTestNotification() async {
+        isNotificationSending = true
+        defer { isNotificationSending = false }
+
+        let appIdentifier = Bundle.main.bundleIdentifier ?? "com.eveng1.swift"
+        let app = G1NotificationApp(identifier: appIdentifier, displayName: "EvenG1 Swift")
+        notificationStatus = "Configuring whitelist..."
+
+        guard await bluetoothManager.configureNotificationWhitelist(
+            G1NotificationWhitelist(apps: [app])
+        ) else {
+            notificationStatus = "Whitelist command was not acknowledged"
+            return
+        }
+
+        notificationStatus = "Sending notification..."
+        let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
+        let notification = G1Notification(
+            messageID: timestamp,
+            appIdentifier: appIdentifier,
+            title: notificationTitle,
+            message: notificationMessage,
+            timestampMilliseconds: timestamp,
+            displayName: app.displayName
+        )
+
+        let sent = await bluetoothManager.sendNotification(notification)
+        notificationStatus = sent ? "Notification acknowledged" : "Notification command was not acknowledged"
+        if sent {
+            isTextFieldFocused = false
+        }
+    }
+
     private func applyTiltDashboardConfig() async {
         let config = G1TiltDashboardConfig(
             enabled: tiltDashboardEnabled,
@@ -753,6 +1018,102 @@ struct DisplayTab: View {
             appEventFallback: tiltAppEventFallback
         )
         _ = await bluetoothManager.configureTiltDashboard(config)
+    }
+
+    private func syncDisplayPositionFormState() {
+        guard let settings = bluetoothManager.displayPositionSettings else {
+            return
+        }
+        displayPositionEnabled = settings.enabled
+        displayHeight = settings.height
+        displayDistance = settings.distance
+    }
+}
+
+struct MTAStationPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let title: String
+    @ObservedObject var pickerViewModel: MTAStationPickerViewModel
+    let userCoordinate: CLLocationCoordinate2D?
+    let onSelect: (MTAStationSelection) -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if pickerViewModel.isLoading {
+                    ProgressView("Loading stations...")
+                }
+
+                if let errorMessage = pickerViewModel.errorMessage {
+                    Text(errorMessage)
+                        .foregroundStyle(.orange)
+                }
+
+                if !pickerViewModel.recentStations.isEmpty {
+                    Section("Recent") {
+                        ForEach(filteredRecentStations) { station in
+                            stationButton(station)
+                        }
+                    }
+                }
+
+                Section("Stations") {
+                    ForEach(pickerViewModel.filteredStations) { station in
+                        stationButton(station)
+                    }
+                }
+            }
+            .searchable(text: $pickerViewModel.query)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+            .task(id: userCoordinate?.latitude ?? 0) {
+                await pickerViewModel.reloadStations(userCoordinate: userCoordinate)
+            }
+        }
+    }
+
+    private var filteredRecentStations: [MTAStationSelection] {
+        let query = pickerViewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else {
+            return pickerViewModel.recentStations
+        }
+
+        return pickerViewModel.recentStations.filter { station in
+            station.stationName.lowercased().contains(query) ||
+            station.stationID.lowercased().contains(query)
+        }
+    }
+
+    private func stationButton(_ station: MTAStationSelection) -> some View {
+        Button {
+            pickerViewModel.markRecent(station)
+            onSelect(station)
+            dismiss()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(station.stationName)
+                    .font(.body)
+                Text(stationDetailText(station))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func stationDetailText(_ station: MTAStationSelection) -> String {
+        if let distance = station.distanceMeters {
+            return "\(Int(distance))m • \(station.stationID)"
+        }
+        return station.stationID
     }
 }
 

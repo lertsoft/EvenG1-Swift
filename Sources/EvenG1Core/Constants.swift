@@ -14,11 +14,11 @@ public enum G1ProtocolMode: String, CaseIterable, Sendable {
 /// BLE Service and Characteristic UUIDs for Even G1 glasses (Nordic UART-style)
 public enum G1BLEConstants {
     /// UART Service UUID
-    public static let uartServiceUUID = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+    public static var uartServiceUUID: CBUUID { CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E") }
     /// TX Characteristic (write to glasses)
-    public static let uartTXCharacteristicUUID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
+    public static var uartTXCharacteristicUUID: CBUUID { CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") }
     /// RX Characteristic (receive notifications from glasses)
-    public static let uartRXCharacteristicUUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+    public static var uartRXCharacteristicUUID: CBUUID { CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E") }
     
     /// Device name prefixes
     public static let deviceNamePrefix = "Even G1"
@@ -52,15 +52,18 @@ public enum G1Command: UInt8 {
     case WHITELIST = 0x04
     case SILENT_MODE = 0x03
     case BRIGHTNESS = 0x0E
+    // Shared command family used for head-up behavior and navigation control.
     case HEAD_UP_ANGLE = 0x0A
     case DASHBOARD_LAYOUT = 0x06
     case DASHBOARD_SHOW = 0x07
+    case DISPLAY_SETTINGS = 0x26
     
     // Status
     case STATUS = 0x22
     case HEARTBEAT = 0x25
     case BATTERY = 0x2C
     case QUICK_NOTE = 0x43
+    case NOTIFICATION = 0x4B
     
     // Audio
     case MIC_ON = 0x0F
@@ -88,6 +91,9 @@ public enum G1CompatibilityCommand {
     public static let microphonePrimary: UInt8 = 0x0E
     /// Microphone control fallback command byte.
     public static let microphoneFallback: UInt8 = G1Command.MIC_ON.rawValue
+
+    /// Navigation command family primary byte (inferred).
+    public static let navigationPrimary: UInt8 = G1Command.HEAD_UP_ANGLE.rawValue
 }
 
 /// G1 Device events (0xF5 payload)
