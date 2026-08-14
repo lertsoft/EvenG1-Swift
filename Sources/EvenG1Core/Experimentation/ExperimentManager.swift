@@ -1,5 +1,4 @@
 import Foundation
-import os.log
 
 /// Model representing an active experiment and assigned variant.
 public struct ExperimentAssignment: Sendable {
@@ -16,8 +15,6 @@ public final class ExperimentManager: @unchecked Sendable {
     private let lock = NSLock()
     private var activeAssignments: [String: ExperimentAssignment] = [:]
     private var mockAssignments: [String: String] = [:]
-
-    private let logger = os.Logger(subsystem: "com.eveng1", category: "Experiments")
 
     private init() {}
 
@@ -52,7 +49,15 @@ public final class ExperimentManager: @unchecked Sendable {
 
         DatadogTelemetryService.shared.trackFeatureFlagEvaluation(name: experimentKey, value: assignedVariant)
 
-        logger.debug("Experiment '\(experimentKey, privacy: .public)' evaluated variant: '\(assignedVariant, privacy: .public)'")
+        DatadogTelemetryService.shared.log(
+            .debug,
+            "Experiment evaluated",
+            attributes: [
+                "component": "experiments",
+                "experiment.key": experimentKey,
+                "experiment.variant": assignedVariant
+            ]
+        )
         return assignedVariant
     }
 
@@ -84,7 +89,11 @@ public final class ExperimentManager: @unchecked Sendable {
             attributes: attributes
         )
 
-        logger.debug("Conversion tracked for '\(experimentKey, privacy: .public)' (\(assignedVariant, privacy: .public)): \(metricName, privacy: .public)")
+        DatadogTelemetryService.shared.log(
+            .debug,
+            "Experiment conversion tracked",
+            attributes: attributes.merging(["component": "experiments"]) { current, _ in current }
+        )
     }
 
     /// Returns current assignment info for an active experiment.

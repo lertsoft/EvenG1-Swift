@@ -70,10 +70,11 @@ What is collected:
   `URLSession.dataReportingRUMResource(for:)`. These are reported manually because
   `URLSessionInstrumentation` matches requests by the class of the session delegate,
   and these clients call async `data(for:)` on a delegate-less session.
-- **Logs** from `G1BluetoothManager`, which mirrors its in-app log ring buffer to
-  Datadog with `component:bluetooth`. Logs carry the active RUM context, so a
-  session in the RUM Explorer links to the Bluetooth logs it produced.
-- **Crashes and app hangs**, symbolicated from uploaded dSYMs.
+- **Logs** at every severity from the Bluetooth, experiment, navigation,
+  transit, notification, navigation, and search text is deliberately excluded.
+- **Handled errors** from recoverable navigation, transit, search, audio, and
+  Bluetooth failures, reported to both Logs and RUM Error Tracking.
+- **Crashes, memory warnings, watchdog terminations, and app hangs**.
 
 Feature flags and experiments are evaluated locally, from mock values or the
 caller's default; only the resulting evaluations are sent to Datadog, so they

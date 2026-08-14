@@ -703,9 +703,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
                 return
             }
 
-            let preview = request.text.prefix(30)
-            let suffix = request.text.count > 30 ? "..." : ""
-            log("Sending \(request.mode.displayName) text: \"\(preview)\(suffix)\" (packets: \(packets.count), ack: \(request.awaitAck))", level: .info)
+            // Notification and navigation text can contain private content.
+            // Retain delivery dimensions without shipping the body remotely.
+            log("Sending \(request.mode.displayName) text (characters: \(request.text.count), packets: \(packets.count), ack: \(request.awaitAck))", level: .info)
 
             for (index, packet) in packets.enumerated() {
                 guard !Task.isCancelled else {
@@ -1860,6 +1860,13 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             message,
             attributes: ["component": "bluetooth"]
         )
+        if level == .error {
+            DatadogTelemetryService.shared.trackError(
+                message: message,
+                type: "BluetoothError",
+                attributes: ["component": "bluetooth"]
+            )
+        }
     }
     
     private func addEvent(_ event: G1Event) {
@@ -2017,6 +2024,10 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         
         log("🎉 Glasses fully connected!", level: .success)
         connectionState = .fullyConnected
+        DatadogTelemetryService.shared.trackHardwareEvent(
+            name: "connection",
+            state: "connected"
+        )
         stopReconnectionTimer()
         reconnectionAttempts = 0
         isReconnecting = false
@@ -2241,6 +2252,15 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         }
         
         updateConnectionState()
+        DatadogTelemetryService.shared.trackHardwareEvent(
+            name: "connection",
+            state: "disconnected",
+            attributes: [
+                "glasses.side": side.rawValue,
+                "connection.unexpected": !isIntentionalDisconnect,
+                "connection.has_error": error != nil
+            ]
+        )
         
         // Attempt reconnection if not intentional
         if !isIntentionalDisconnect && autoReconnect {

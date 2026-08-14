@@ -106,6 +106,15 @@ struct NotificationsWidgetView: View {
             G1NotificationWhitelist(apps: [app])
         ) else {
             status = "The glasses did not accept this app. Try reconnecting."
+            DatadogTelemetryService.shared.log(
+                .warn,
+                "Notification whitelist configuration failed",
+                attributes: ["component": "notifications"]
+            )
+            DatadogTelemetryService.shared.trackProductEvent(
+                name: "notification_delivery_failed",
+                attributes: ["notification.stage": "whitelist"]
+            )
             return
         }
 
@@ -122,6 +131,17 @@ struct NotificationsWidgetView: View {
 
         let sent = await bluetoothManager.sendNotification(notification)
         status = sent ? "Delivered to your glasses" : "The glasses did not confirm delivery."
+        DatadogTelemetryService.shared.trackProductEvent(
+            name: sent ? "notification_delivered" : "notification_delivery_failed",
+            attributes: ["notification.stage": "delivery"]
+        )
+        if !sent {
+            DatadogTelemetryService.shared.log(
+                .warn,
+                "Notification delivery was not acknowledged",
+                attributes: ["component": "notifications"]
+            )
+        }
         if sent {
             isFieldFocused = false
         }

@@ -41,6 +41,13 @@ struct ContentView: View {
         .onAppear {
             transitViewModel.bind(bluetoothManager: bluetoothManager)
         }
+        .onChange(of: selectedTab) { _, newTab in
+            let tabName = ["device", "navigate", "heads_up"][safe: newTab] ?? "unknown"
+            DatadogTelemetryService.shared.trackProductEvent(
+                name: "tab_selected",
+                attributes: ["tab.name": tabName]
+            )
+        }
         .onChange(of: bluetoothManager.eventRevision) { _, _ in
             guard let latestEvent = bluetoothManager.events.first else {
                 return
@@ -50,6 +57,12 @@ struct ContentView: View {
                 await transitViewModel.handleGlassesEvent(latestEvent)
             }
         }
+    }
+}
+
+private extension Collection {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

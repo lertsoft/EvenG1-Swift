@@ -140,6 +140,7 @@ final class MTATrainViewModel: ObservableObject {
             return
         }
 
+        let startedAt = Date()
         isRefreshing = true
         errorMessage = nil
         defer {
@@ -183,6 +184,16 @@ final class MTATrainViewModel: ObservableObject {
             syncCurrentStationPreferenceMode()
             rebuildVisualPages(resetToFirst: true)
             await sendCurrentPageToGlassesIfConnected()
+            DatadogTelemetryService.shared.trackProductEvent(
+                name: "transit_refreshed",
+                attributes: [
+                    "transit.trigger": trigger.rawValue,
+                    "transit.arrival_count": snapshot.upcomingTrains.count,
+                    "transit.alert_count": snapshot.alerts.count,
+                    "transit.used_station_fallback": snapshot.usedFallbackFromPreferredStation,
+                    "operation.duration_ms": Int(Date().timeIntervalSince(startedAt) * 1_000)
+                ]
+            )
         } catch {
             // Disabling auto-refresh or leaving the tab cancels the task. That
             // lifecycle event should not replace valid results with an error.
@@ -192,6 +203,16 @@ final class MTATrainViewModel: ObservableObject {
 
             let message = userFacingMessage(for: error)
             errorMessage = message
+            DatadogTelemetryService.shared.capture(
+                error: error,
+                message: "Transit refresh failed",
+                attributes: [
+                    "component": "transit",
+                    "operation": "refresh",
+                    "transit.trigger": trigger.rawValue,
+                    "operation.duration_ms": Int(Date().timeIntervalSince(startedAt) * 1_000)
+                ]
+            )
 
             if upcomingTrains.isEmpty {
                 nearestStationName = "MTA lookup failed"
@@ -318,7 +339,11 @@ final class MTATrainViewModel: ObservableObject {
                 return
             }
         } catch {
-            // Fall through to text fallback.
+            DatadogTelemetryService.shared.capture(
+                error: error,
+                message: "Transit bitmap rendering failed; using text fallback",
+                attributes: ["component": "transit", "operation": "render_bitmap"]
+            )
         }
 
         bitmapDeliveryStatus = "Bitmap failed, used text fallback"

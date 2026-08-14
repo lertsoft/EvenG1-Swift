@@ -1,40 +1,31 @@
 {
-  "originHash" : "65953b963d67fa353f302d6f39a18466af3ae2edb06119048f64592422263c88",
+  "originHash" : "18374b6af1fd58a6cc0d21cdbd687fd90e4bbd05af8aef407ddcb891995cd484",
   "pins" : [
     {
       "identity" : "dd-sdk-ios",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Datadog/dd-sdk-ios.git",
       "state" : {
-        "revision" : "f8a2cb3d4ac8b60c44177dbae10638ceb941c1f4",
-        "version" : "3.15.0"
+        "revision" : "2cddcb47c021365c5a6ebc377cb379aa979c450e",
+        "version" : "3.4.0"
       }
     },
     {
-      "identity" : "kscrash",
+      "identity" : "opentelemetry-swift-packages",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/kstenerud/KSCrash.git",
+      "location" : "https://github.com/DataDog/opentelemetry-swift-packages.git",
       "state" : {
-        "revision" : "3f77f379c2db001e0c261c2a51b7e2b115d31f91",
-        "version" : "2.6.0"
+        "revision" : "4a7295600d4ebb9525a23c11586c5fdb74ae8b7e",
+        "version" : "1.13.1"
       }
     },
     {
-      "identity" : "opentelemetry-swift-core",
+      "identity" : "plcrashreporter",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/open-telemetry/opentelemetry-swift-core",
+      "location" : "https://github.com/microsoft/plcrashreporter.git",
       "state" : {
-        "revision" : "06f8a460a66f813758d22f09025d85df45450a63",
-        "version" : "2.5.1"
-      }
-    },
-    {
-      "identity" : "swift-atomics",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-atomics.git",
-      "state" : {
-        "revision" : "0442cb5a3f98ab802acb777929fdb446bda11a34",
-        "version" : "1.3.1"
+        "revision" : "0254f941c646b1ed17b243654723d0f071e990d0",
+        "version" : "1.12.2"
       }
     },
     {
