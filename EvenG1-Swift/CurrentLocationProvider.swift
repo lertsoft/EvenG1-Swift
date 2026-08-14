@@ -27,10 +27,6 @@ final class CurrentLocationProvider: NSObject, LocationProviding, CLLocationMana
     }
 
     func requestOneShotLocation() async throws -> CLLocationCoordinate2D {
-        guard CLLocationManager.locationServicesEnabled() else {
-            throw CurrentLocationError.servicesDisabled
-        }
-
         guard continuation == nil else {
             throw CurrentLocationError.underlying("Another location request is already in progress.")
         }

@@ -14,7 +14,8 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.38.1")
+        .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.38.1"),
+        .package(url: "https://github.com/Datadog/dd-sdk-ios.git", from: "2.14.0")
     ],
     targets: [
         .target(
@@ -30,7 +31,10 @@ let package = Package(
             name: "EvenG1Core",
             dependencies: [
                 "CLibLC3",
-                .product(name: "SwiftProtobuf", package: "swift-protobuf")
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+                .product(name: "DatadogCore", package: "dd-sdk-ios"),
+                .product(name: "DatadogRUM", package: "dd-sdk-ios"),
+                .product(name: "DatadogCrashReporting", package: "dd-sdk-ios")
             ],
             path: "Sources/EvenG1Core"
         ),
