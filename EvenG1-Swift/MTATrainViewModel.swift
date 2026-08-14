@@ -25,6 +25,8 @@ final class MTATrainViewModel: ObservableObject {
     @Published private(set) var alertsUnavailable = false
 
     @Published private(set) var selectedStation: MTAStationSelection?
+    /// Page currently mirrored to the glasses, so the app can preview it.
+    @Published private(set) var currentVisualPage: MTAVisualPage?
     @Published private(set) var visualPageIndexText = "Page 0/0"
     @Published private(set) var bitmapDeliveryStatus = "Bitmap idle"
     @Published private(set) var lockStatusText = "Auto-nearest"
@@ -40,7 +42,7 @@ final class MTATrainViewModel: ObservableObject {
     private weak var bluetoothManager: G1BluetoothManager?
 
     private var autoRefreshTask: Task<Void, Never>?
-    private var isDisplayTabActive = false
+    private var isWidgetActive = false
     private var lastTiltRefreshAt: Date?
     private var lastEdgeRefreshAt: Date?
     private var currentPages: [MTAVisualPage] = []
@@ -82,8 +84,10 @@ final class MTATrainViewModel: ObservableObject {
         self.bluetoothManager = bluetoothManager
     }
 
-    func setDisplayTabActive(_ isActive: Bool) {
-        isDisplayTabActive = isActive
+    /// Whether the transit widget is on screen. Gates auto-refresh and glasses
+    /// gestures so the widget never fights another feature for the display.
+    func setWidgetActive(_ isActive: Bool) {
+        isWidgetActive = isActive
         updateAutoRefreshTask()
     }
 
@@ -212,7 +216,7 @@ final class MTATrainViewModel: ObservableObject {
     }
 
     func handleGlassesEvent(_ event: G1Event) async {
-        guard isDisplayTabActive else {
+        guard isWidgetActive else {
             return
         }
 
@@ -286,9 +290,11 @@ final class MTATrainViewModel: ObservableObject {
     private func updatePageStatus() {
         let total = currentPages.count
         if total == 0 {
+            currentVisualPage = nil
             visualPageIndexText = "Page 0/0"
             return
         }
+        currentVisualPage = currentPages.indices.contains(currentPageIndex) ? currentPages[currentPageIndex] : nil
         visualPageIndexText = "Page \(currentPageIndex + 1)/\(total)"
     }
 
@@ -392,7 +398,7 @@ final class MTATrainViewModel: ObservableObject {
         autoRefreshTask?.cancel()
         autoRefreshTask = nil
 
-        guard autoRefreshEnabled, isDisplayTabActive else {
+        guard autoRefreshEnabled, isWidgetActive else {
             return
         }
 

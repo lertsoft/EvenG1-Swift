@@ -92,6 +92,16 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Last display-position setting acknowledged by both arms.
     @Published public private(set) var displayPositionSettings: G1DisplayPositionSettings?
 
+    /// Whether silent mode is believed to be on, tracked app-side because the
+    /// glasses do not report the setting back.
+    @Published public private(set) var isSilentModeEnabled: Bool = false
+
+    /// Brightness last requested through ``setBrightness(_:autoMode:)``.
+    @Published public private(set) var brightnessLevel: Int = 50
+
+    /// Whether automatic brightness was requested with the last brightness command.
+    @Published public private(set) var isAutoBrightnessEnabled: Bool = false
+
     /// Glasses microphone capture state.
     @Published public private(set) var microphoneState: G1MicrophoneState = .idle
 
@@ -240,6 +250,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     private var isIntentionalDisconnect: Bool = false
     private var shouldReconnectAfterCentralRecovery: Bool = false
     private var isReconnecting: Bool = false
+    private var hasAttemptedLaunchReconnect: Bool = false
 
     /// Dashboard fallback debounce for event-driven show/hide.
     private var lastDashboardFallbackActionAt: Date?
@@ -279,6 +290,16 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             case warning = "⚠️"
             case error = "❌"
             case success = "✅"
+
+            var telemetryLevel: TelemetryLogLevel {
+                switch self {
+                case .debug: return .debug
+                case .info: return .info
+                case .warning: return .warn
+                case .error: return .error
+                case .success: return .notice
+                }
+            }
         }
         
         public var formattedTime: String {
@@ -323,6 +344,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             isReconnecting = false
             stopReconnectionTimer()
             reconnectionAttempts = 0
+            hasAttemptedLaunchReconnect = true
         }
         
         isScanning = true
@@ -864,6 +886,8 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     public func setBrightness(_ level: Int, autoMode: Bool = false) {
         // Map 0-100 to 0-41 (G1 brightness range)
         let mappedLevel = min(41, max(0, Int((Double(level) / 100.0) * 41.0)))
+        brightnessLevel = min(100, max(0, level))
+        isAutoBrightnessEnabled = autoMode
         log("Setting brightness to \(level)% (mapped: \(mappedLevel))...", level: .info)
 
         Task {
@@ -887,6 +911,10 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Set silent mode
     public func setSilentMode(_ enabled: Bool) {
         let command = Data([G1Command.SILENT_MODE.rawValue, enabled ? 0x0C : 0x0A, 0x00])
+        let previousValue = isSilentModeEnabled
+        // Reflect the request immediately so a bound toggle does not lag the tap,
+        // then roll back if the glasses never acknowledge the command.
+        isSilentModeEnabled = enabled
         Task {
             let acked = await sendCommandAwaitAck(
                 command,
@@ -895,6 +923,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             if acked {
                 log("Silent mode: \(enabled ? "ON" : "OFF")", level: .info)
             } else {
+                isSilentModeEnabled = previousValue
                 log("Silent-mode command was not acknowledged", level: .warning)
             }
         }
@@ -1349,6 +1378,23 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         navigationTraceEntries.removeAll()
     }
     
+    /// Whether a previously connected pair is stored and can be reconnected without a scan.
+    public var hasRememberedGlasses: Bool {
+        UserDefaults.standard.string(forKey: Self.lastLeftUUIDKey) != nil &&
+        UserDefaults.standard.string(forKey: Self.lastRightUUIDKey) != nil &&
+        UserDefaults.standard.string(forKey: Self.lastChannelKey) != nil
+    }
+
+    /// Reconnect to the remembered pair if there is one, otherwise scan.
+    /// This is the single entry point the UI needs for "get me connected".
+    public func connectToPreferredGlasses() {
+        if hasRememberedGlasses {
+            reconnectToLastKnown()
+        } else {
+            startScanning()
+        }
+    }
+
     /// Try to reconnect to last known glasses
     public func reconnectToLastKnown() {
         if !isReconnecting {
@@ -1807,6 +1853,13 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         
         // Also log to system
         logger.log("\(level.rawValue) \(message)")
+
+        // The emoji stays out of the remote message so Datadog can group on it.
+        DatadogTelemetryService.shared.log(
+            level.telemetryLevel,
+            message,
+            attributes: ["component": "bluetooth"]
+        )
     }
     
     private func addEvent(_ event: G1Event) {
@@ -2226,6 +2279,16 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             if shouldReconnectAfterCentralRecovery, autoReconnect, !isIntentionalDisconnect {
                 shouldReconnectAfterCentralRecovery = false
                 startReconnectionTimer()
+            } else if !hasAttemptedLaunchReconnect,
+                      autoReconnect,
+                      !isIntentionalDisconnect,
+                      connectedGlasses == nil,
+                      hasRememberedGlasses {
+                // Radio readiness is the earliest safe moment to restore the last
+                // pair, so the app is connected before the user opens it.
+                hasAttemptedLaunchReconnect = true
+                log("Restoring last known glasses on launch", level: .info)
+                reconnectToLastKnown()
             }
 
         case .poweredOff, .resetting:

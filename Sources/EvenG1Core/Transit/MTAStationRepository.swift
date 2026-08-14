@@ -137,7 +137,7 @@ public actor MTAStationRepository: MTAStationProviding {
             timeoutInterval: 20
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.dataReportingRUMResource(for: request)
 
         if let httpResponse = response as? HTTPURLResponse,
            !(200...299).contains(httpResponse.statusCode) {

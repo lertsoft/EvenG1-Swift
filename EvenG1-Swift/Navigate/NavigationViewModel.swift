@@ -35,6 +35,9 @@ final class NavigationViewModel: ObservableObject {
     @Published private(set) var isGuidanceMuted: Bool = false
     @Published private(set) var transportModeLabel: String = G1NavigationTransportMode.nativePackets.displayName
 
+    /// Last guidance line handed to the glasses, for the in-app HUD preview.
+    @Published private(set) var hudInstructionText: String = ""
+
     @Published private(set) var favorites: [NavigationFavorite] = []
 
     private let searchService: MapSearchService
@@ -143,6 +146,9 @@ final class NavigationViewModel: ObservableObject {
             activeInstructionTitle = plan.destinationName
             activeInstructionSubtitle = subtitleForPreview(plan)
             progressFraction = 0
+            hudInstructionText = plan.route
+                .flatMap { buildInstruction(for: $0, stepIndex: 0, tracking: nil) }
+                .map { $0.fallbackText() } ?? ""
 
             if let route = plan.route {
                 let rect = route.polyline.boundingMapRect
@@ -212,6 +218,7 @@ final class NavigationViewModel: ObservableObject {
         activeInstructionTitle = "Navigation stopped"
         activeInstructionSubtitle = "Search for another destination"
         progressFraction = 0
+        hudInstructionText = ""
     }
 
     func setFavorite(kind: NavigationFavoriteKind) {
@@ -440,6 +447,7 @@ final class NavigationViewModel: ObservableObject {
             return
         }
 
+        hudInstructionText = instruction.fallbackText()
         _ = await bluetoothManager?.sendNavigationInstruction(instruction)
         transportModeLabel = bluetoothManager?.navigationTransportMode.displayName ?? transportModeLabel
     }

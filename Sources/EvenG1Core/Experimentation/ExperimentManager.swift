@@ -1,5 +1,5 @@
 import Foundation
-import DatadogRUM
+import os.log
 
 /// Model representing an active experiment and assigned variant.
 public struct ExperimentAssignment: Sendable {
@@ -8,25 +8,29 @@ public struct ExperimentAssignment: Sendable {
     public let timestamp: Date
 }
 
-/// Service managing Datadog Experiments (A/B testing) built on Feature Flags and RUM telemetry.
+/// Service managing A/B experiment assignment on top of feature flags, reporting
+/// exposures and conversions to Datadog RUM.
 public final class ExperimentManager: @unchecked Sendable {
     public static let shared = ExperimentManager()
-    
+
+    private let lock = NSLock()
     private var activeAssignments: [String: ExperimentAssignment] = [:]
     private var mockAssignments: [String: String] = [:]
-    
+
+    private let logger = os.Logger(subsystem: "com.eveng1", category: "Experiments")
+
     private init() {}
-    
+
     /// Set a mock experiment assignment for testing or local debugging.
     public func setMockVariant(experimentKey: String, variant: String) {
-        mockAssignments[experimentKey] = variant
+        lock.withLock { mockAssignments[experimentKey] = variant }
     }
-    
+
     /// Clear registered mock experiment variants.
     public func clearMockVariants() {
-        mockAssignments.removeAll()
+        lock.withLock { mockAssignments.removeAll() }
     }
-    
+
     /// Evaluates an experiment variant for the current user session and reports exposure to Datadog RUM.
     /// - Parameters:
     ///   - experimentKey: Unique identifier for the experiment in Datadog.
@@ -34,29 +38,24 @@ public final class ExperimentManager: @unchecked Sendable {
     /// - Returns: Assigned experiment variant string (e.g. "control", "variant_b").
     @discardableResult
     public func evaluateExperiment(experimentKey: String, defaultVariant: String = "control") -> String {
-        let assignedVariant: String
-        if let mock = mockAssignments[experimentKey] {
-            assignedVariant = mock
-        } else {
-            assignedVariant = FeatureFlagManager.shared.stringValue(forKey: experimentKey, defaultValue: defaultVariant)
-        }
-        
+        // Resolved rather than evaluated through `FeatureFlagManager`, which would
+        // report the exposure a second time under the same flag name.
+        let assignedVariant = lock.withLock { mockAssignments[experimentKey] }
+            ?? FeatureFlagManager.shared.resolve(key: experimentKey, defaultValue: defaultVariant)
+
         let assignment = ExperimentAssignment(
             experimentKey: experimentKey,
             variant: assignedVariant,
             timestamp: Date()
         )
-        activeAssignments[experimentKey] = assignment
-        
-        // Report experiment exposure to Datadog RUM
-        if DatadogTelemetryService.shared.isInitialized {
-            RUMMonitor.shared().addFeatureFlagEvaluation(name: experimentKey, value: assignedVariant)
-        }
-        
-        print("[ExperimentManager] Experiment '\(experimentKey)' evaluated variant: '\(assignedVariant)'")
+        lock.withLock { activeAssignments[experimentKey] = assignment }
+
+        DatadogTelemetryService.shared.trackFeatureFlagEvaluation(name: experimentKey, value: assignedVariant)
+
+        logger.debug("Experiment '\(experimentKey, privacy: .public)' evaluated variant: '\(assignedVariant, privacy: .public)'")
         return assignedVariant
     }
-    
+
     /// Track a goal conversion or metric event tied to an active experiment in RUM.
     /// - Parameters:
     ///   - experimentKey: Key of the experiment being measured.
@@ -69,8 +68,8 @@ public final class ExperimentManager: @unchecked Sendable {
         value: Double? = nil,
         extraAttributes: [String: Encodable] = [:]
     ) {
-        let assignedVariant = activeAssignments[experimentKey]?.variant ?? "unknown"
-        
+        let assignedVariant = lock.withLock { activeAssignments[experimentKey]?.variant } ?? "unknown"
+
         var attributes: [String: Encodable] = extraAttributes
         attributes["experiment.key"] = experimentKey
         attributes["experiment.variant"] = assignedVariant
@@ -78,18 +77,18 @@ public final class ExperimentManager: @unchecked Sendable {
         if let value = value {
             attributes["experiment.metric_value"] = value
         }
-        
+
         DatadogTelemetryService.shared.trackAction(
-            type: .tap,
+            type: .custom,
             name: "experiment_conversion_\(metricName)",
             attributes: attributes
         )
-        
-        print("[ExperimentManager] Conversion tracked for '\(experimentKey)' (\(assignedVariant)): \(metricName)")
+
+        logger.debug("Conversion tracked for '\(experimentKey, privacy: .public)' (\(assignedVariant, privacy: .public)): \(metricName, privacy: .public)")
     }
-    
+
     /// Returns current assignment info for an active experiment.
     public func currentAssignment(for experimentKey: String) -> ExperimentAssignment? {
-        return activeAssignments[experimentKey]
+        lock.withLock { activeAssignments[experimentKey] }
     }
 }

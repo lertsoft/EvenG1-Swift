@@ -1,7 +1,6 @@
 import SwiftUI
 import MapKit
 import EvenG1Core
-import UniformTypeIdentifiers
 
 struct NavigateTab: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
@@ -10,7 +9,17 @@ struct NavigateTab: View {
 
     @StateObject private var viewModel = NavigationViewModel()
     @State private var selectedFavoriteForRemoval: NavigationFavorite?
-    @State private var isDiagnosticsPresented = false
+    @State private var isConfirmingStop = false
+    @State private var isHUDPreviewVisible = false
+
+    private var isTripActive: Bool {
+        switch viewModel.state {
+        case .navigating, .rerouting:
+            return true
+        case .idle, .searching, .routePreview, .arrived, .error:
+            return false
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -23,6 +32,9 @@ struct NavigateTab: View {
                     suggestionsPanel
                     if viewModel.isOverlayVisible {
                         maneuverBanner
+                    }
+                    if isHUDPreviewVisible {
+                        hudPreviewPanel
                     }
                     Spacer()
                 }
@@ -37,9 +49,15 @@ struct NavigateTab: View {
             .background(Color.black)
             .ignoresSafeArea(edges: .bottom)
             .navigationBarHidden(true)
-            .sheet(isPresented: $isDiagnosticsPresented) {
-                NavigationDiagnosticsView()
-                    .environmentObject(bluetoothManager)
+            .confirmationDialog(
+                "End navigation to \(viewModel.destinationTitle.isEmpty ? "this destination" : viewModel.destinationTitle)?",
+                isPresented: $isConfirmingStop,
+                titleVisibility: .visible
+            ) {
+                Button("End Navigation", role: .destructive) {
+                    Task { await viewModel.stopNavigation() }
+                }
+                Button("Keep Going", role: .cancel) {}
             }
             .onAppear {
                 viewModel.bind(bluetoothManager: bluetoothManager)
@@ -110,41 +128,96 @@ struct NavigateTab: View {
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Navigate")
+                Text(isTripActive ? viewModel.destinationTitle : "Navigate")
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(.white)
-                Text(viewModel.transportModeLabel)
+                    .lineLimit(1)
+                Text(headerSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Spacer()
 
-            Button {
-                isDiagnosticsPresented = true
-            } label: {
-                Label("Diagnostics", systemImage: "waveform.path.ecg")
-                    .labelStyle(.iconOnly)
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(10)
-                    .background(.ultraThinMaterial, in: Circle())
+            if isTripActive {
+                Button {
+                    isConfirmingStop = true
+                } label: {
+                    Text("End")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(Color.red.opacity(0.85)))
+                }
+                .accessibilityIdentifier("navigation.endTripButton")
             }
-            .accessibilityIdentifier("navigationDiagnosticsButton")
 
             Button {
-                Task { await viewModel.stopNavigation() }
+                isHUDPreviewVisible.toggle()
             } label: {
-                Label("Stop", systemImage: "xmark.circle")
+                Label("Glasses preview", systemImage: "eyeglasses")
                     .labelStyle(.iconOnly)
                     .font(.title3)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(isHUDPreviewVisible ? Color.cyan : .white.opacity(0.85))
                     .padding(10)
                     .background(.ultraThinMaterial, in: Circle())
             }
+            .accessibilityIdentifier("navigation.hudPreviewButton")
         }
+    }
+
+    private var headerSubtitle: String {
+        switch viewModel.state {
+        case .idle:
+            return "Search or pick a favorite"
+        case .searching:
+            return "Searching…"
+        case .routePreview:
+            return viewModel.activeInstructionSubtitle
+        case .navigating:
+            return "Guidance on your glasses"
+        case .rerouting:
+            return "Finding a new route…"
+        case .arrived:
+            return "You have arrived"
+        case .error(let message):
+            return message
+        }
+    }
+
+    private var hudPreviewPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("On your glasses")
+                if bluetoothManager.connectionState != .fullyConnected {
+                    Text("· not connected")
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+                Text(viewModel.transportModeLabel)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            GlassesHUDPreview(
+                text: viewModel.hudInstructionText,
+                placeholder: "Pick a destination to preview guidance"
+            )
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.black.opacity(0.62))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+        )
+        .accessibilityIdentifier("navigation.hudPreviewPanel")
     }
 
     private var searchField: some View {
@@ -368,9 +441,9 @@ struct NavigateTab: View {
 
             case .navigating, .rerouting:
                 Button {
-                    Task { await viewModel.stopNavigation() }
+                    isConfirmingStop = true
                 } label: {
-                    Label("Stop", systemImage: "stop.circle")
+                    Label("End trip", systemImage: "stop.circle")
                 }
                 .buttonStyle(.bordered)
 
@@ -462,144 +535,6 @@ struct NavigateTab: View {
             return "building.2"
         case .custom:
             return "mappin.and.ellipse"
-        }
-    }
-}
-
-private struct NavigationTraceDocument: FileDocument {
-    // JSON Lines has no system UTType. Generic data preserves the explicit
-    // `.jsonl` filename instead of allowing a `.txt` suffix to be appended.
-    static var readableContentTypes: [UTType] { [.data] }
-
-    var text: String
-
-    init(text: String) {
-        self.text = text
-    }
-
-    init(configuration: ReadConfiguration) throws {
-        guard let data = configuration.file.regularFileContents,
-              let text = String(data: data, encoding: .utf8) else {
-            throw CocoaError(.fileReadCorruptFile)
-        }
-        self.text = text
-    }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: Data(text.utf8))
-    }
-}
-
-private struct NavigationDiagnosticsView: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var bluetoothManager: G1BluetoothManager
-
-    @State private var exportDocument = NavigationTraceDocument(text: "")
-    @State private var isExporting = false
-    @State private var isConfirmingClear = false
-    @State private var exportStatus: String?
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Session") {
-                    LabeledContent("Connection", value: bluetoothManager.connectionState.displayString)
-                    LabeledContent("State", value: bluetoothManager.navigationSessionState.rawValue.capitalized)
-                    LabeledContent("Transport", value: bluetoothManager.navigationTransportMode.displayName)
-                    LabeledContent("Trace entries", value: "\(bluetoothManager.navigationTraceEntries.count)")
-                }
-
-                Section {
-                    Button {
-                        exportDocument = NavigationTraceDocument(
-                            text: bluetoothManager.exportNavigationTraceJSONL()
-                        )
-                        exportStatus = nil
-                        isExporting = true
-                    } label: {
-                        Label("Export chronological JSONL", systemImage: "square.and.arrow.up")
-                    }
-                    .disabled(bluetoothManager.navigationTraceEntries.isEmpty)
-                    .accessibilityIdentifier("exportNavigationTraceButton")
-
-                    Button(role: .destructive) {
-                        isConfirmingClear = true
-                    } label: {
-                        Label("Clear trace", systemImage: "trash")
-                    }
-                    .disabled(bluetoothManager.navigationTraceEntries.isEmpty)
-
-                    if let exportStatus {
-                        Text(exportStatus)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("Evidence")
-                } footer: {
-                    Text("Exports oldest-to-newest records with ISO 8601 timestamps. Attach the file to the hardware validation matrix with the glasses firmware version.")
-                }
-
-                Section("Recent records") {
-                    if bluetoothManager.navigationTraceEntries.isEmpty {
-                        Text("Start navigation to collect native and fallback transport evidence.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(bluetoothManager.navigationTraceEntries.prefix(20)) { entry in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(entry.direction.rawValue.uppercased())
-                                        .font(.caption.weight(.semibold))
-                                    Text(String(format: "0x%02X", entry.command))
-                                        .font(.caption.monospaced())
-                                    Spacer()
-                                    Text(entry.transportMode.displayName)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                if let note = entry.note, !note.isEmpty {
-                                    Text(note)
-                                        .font(.footnote)
-                                }
-                                Text(entry.timestamp, format: .dateTime.hour().minute().second())
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Navigation Diagnostics")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .confirmationDialog(
-                "Clear all navigation trace entries?",
-                isPresented: $isConfirmingClear,
-                titleVisibility: .visible
-            ) {
-                Button("Clear Trace", role: .destructive) {
-                    bluetoothManager.clearNavigationTrace()
-                    exportStatus = nil
-                }
-                Button("Cancel", role: .cancel) {}
-            }
-            .fileExporter(
-                isPresented: $isExporting,
-                document: exportDocument,
-                contentType: .data,
-                defaultFilename: "EvenG1-navigation-trace-\(Int(Date().timeIntervalSince1970)).jsonl"
-            ) { result in
-                switch result {
-                case .success:
-                    exportStatus = "Trace exported"
-                case .failure(let error):
-                    exportStatus = "Export failed: \(error.localizedDescription)"
-                }
-            }
         }
     }
 }

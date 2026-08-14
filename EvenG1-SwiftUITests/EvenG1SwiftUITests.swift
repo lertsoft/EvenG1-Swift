@@ -13,111 +13,165 @@ final class EvenG1SwiftUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    func testConnectTabShowsDisconnectedStateAndScanControls() throws {
+    // MARK: - Information architecture
+
+    func testTabBarExposesOnlyConsumerDestinations() throws {
         XCTAssertTrue(app.navigationBars["Even G1"].waitForExistence(timeout: 5))
 
-        let noGlassesState = element(identifier: "connection.noGlasses")
-        XCTAssertTrue(noGlassesState.waitForExistence(timeout: 5))
+        for name in ["Device", "Navigate", "Heads-Up"] {
+            XCTAssertTrue(app.tabBars.buttons[name].exists, "Missing consumer tab: \(name)")
+        }
 
-        let scanButton = app.buttons["connection.scanButton"]
-        let reconnectButton = app.buttons["connection.reconnectButton"]
-
-        XCTAssertTrue(scanButton.exists)
-        XCTAssertTrue(reconnectButton.exists)
-        XCTAssertTrue(scanButton.isEnabled)
-        XCTAssertTrue(reconnectButton.isEnabled)
+        for name in ["Display", "Logs"] {
+            XCTAssertFalse(app.tabBars.buttons[name].exists, "Debug tab still in tab bar: \(name)")
+        }
     }
 
-    func testDisplayTabRequiresConnectionAndDisablesPrimaryActions() throws {
-        tapTab(named: "Display")
+    // MARK: - Device tab
 
-        XCTAssertTrue(app.navigationBars["Display"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["display.connectRequiredLabel"].waitForExistence(timeout: 5))
+    func testDeviceTabShowsSingleConnectActionWhenDisconnected() throws {
+        XCTAssertTrue(app.navigationBars["Even G1"].waitForExistence(timeout: 5))
 
-        let sendButton = app.buttons["display.sendButton"]
-        let clearButton = app.buttons["display.clearButton"]
+        let connectButton = app.buttons["device.connectButton"]
+        XCTAssertTrue(connectButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(connectButton.isEnabled)
 
-        XCTAssertTrue(sendButton.exists)
-        XCTAssertTrue(clearButton.exists)
-        XCTAssertFalse(sendButton.isEnabled)
-        XCTAssertFalse(clearButton.isEnabled)
-
-        let mtaRefreshButton = element(identifier: "mta.refreshButton")
-        let mtaStatusLabel = element(identifier: "mta.statusLabel")
-
-        scrollToElement(mtaStatusLabel, maximumSwipes: 10)
-        XCTAssertTrue(mtaStatusLabel.waitForExistence(timeout: 5))
-        scrollToElement(mtaRefreshButton, maximumSwipes: 10)
-        XCTAssertTrue(mtaRefreshButton.exists)
+        XCTAssertTrue(element(identifier: "device.connectHint").exists)
+        XCTAssertFalse(app.buttons["device.disconnectButton"].exists)
+        XCTAssertFalse(app.buttons["device.silentModeToggle"].exists)
     }
 
-    func testDisplayTabShowsMTAAutoRefreshToggleAndDefaultStatus() throws {
-        tapTab(named: "Display")
+    func testGlassesConfigurationRequiresConnection() throws {
+        element(identifier: "device.configurationLink").tap()
 
-        let mtaStatusLabel = element(identifier: "mta.statusLabel")
-        let mtaAutoRefreshToggle = element(identifier: "mta.autoRefreshToggle")
+        XCTAssertTrue(app.navigationBars["Glasses Configuration"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["configuration.connectRequiredLabel"].waitForExistence(timeout: 5))
 
-        scrollToElement(mtaStatusLabel, maximumSwipes: 10)
-        XCTAssertTrue(mtaStatusLabel.waitForExistence(timeout: 5))
-        XCTAssertEqual(mtaStatusLabel.label, "No train lookup yet")
-        scrollToElement(mtaAutoRefreshToggle, maximumSwipes: 10)
-        XCTAssertTrue(mtaAutoRefreshToggle.waitForExistence(timeout: 5))
+        let applyPosition = element(identifier: "configuration.positionApply")
+        scrollToElement(applyPosition, maximumSwipes: 8)
+        XCTAssertTrue(applyPosition.exists)
+        XCTAssertFalse(applyPosition.isEnabled)
+        XCTAssertTrue(element(identifier: "configuration.positionHeight").exists)
+        XCTAssertTrue(element(identifier: "configuration.positionDistance").exists)
     }
 
-    func testLogsTabCanSwitchToEventsEmptyState() throws {
-        tapTab(named: "Logs")
+    // MARK: - Developer mode
 
-        XCTAssertTrue(app.navigationBars["Debug"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.navigationBars["Debug"].buttons["Clear"].exists)
+    func testDeveloperToolsAreHiddenUntilDeveloperModeIsEnabled() throws {
+        XCTAssertTrue(app.navigationBars["Even G1"].waitForExistence(timeout: 5))
+        XCTAssertFalse(element(identifier: "device.developerToolsLink").exists)
+
+        element(identifier: "device.supportLink").tap()
+        XCTAssertTrue(app.navigationBars["Support & Diagnostics"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["support.exportButton"].exists)
+
+        let developerToggle = app.switches["support.developerModeToggle"]
+        XCTAssertTrue(developerToggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(developerToggle.value as? String, "0")
+        setSwitch(developerToggle, on: true)
+        XCTAssertEqual(developerToggle.value as? String, "1")
+
+        navigateBack()
+
+        let developerLink = element(identifier: "device.developerToolsLink")
+        XCTAssertTrue(developerLink.waitForExistence(timeout: 5))
+        developerLink.tap()
+
+        XCTAssertTrue(app.navigationBars["Developer Tools"].waitForExistence(timeout: 5))
+
+        element(identifier: "developer.logsLink").tap()
+        XCTAssertTrue(app.navigationBars["Logs & Events"].waitForExistence(timeout: 5))
 
         let eventsSegment = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Events")).firstMatch
         XCTAssertTrue(eventsSegment.waitForExistence(timeout: 5))
         eventsSegment.tap()
-
         XCTAssertTrue(element(identifier: "events.emptyState").waitForExistence(timeout: 5))
+
     }
 
-    func testDisplayPositionControlsArePresentAndRequireConnection() throws {
-        tapTab(named: "Display")
-
-        let applyButton = element(identifier: "display.positionApply")
-        scrollToElement(applyButton, maximumSwipes: 16)
-
-        XCTAssertTrue(applyButton.waitForExistence(timeout: 5))
-        XCTAssertFalse(applyButton.isEnabled)
-        XCTAssertTrue(element(identifier: "display.positionEnabled").exists)
-        XCTAssertTrue(element(identifier: "display.positionHeight").exists)
-        XCTAssertTrue(element(identifier: "display.positionDistance").exists)
-    }
-
-    func testNotificationTransportControlsArePresentAndRequireConnection() throws {
-        tapTab(named: "Display")
-
-        let sendButton = element(identifier: "display.notificationSendButton")
-        scrollToElement(sendButton, maximumSwipes: 10)
-
-        XCTAssertTrue(sendButton.waitForExistence(timeout: 5))
-        XCTAssertFalse(sendButton.isEnabled)
-        XCTAssertTrue(element(identifier: "display.notificationTitleField").exists)
-        XCTAssertTrue(element(identifier: "display.notificationMessageField").exists)
-        XCTAssertEqual(element(identifier: "display.notificationStatus").label, "Not sent")
-    }
-
-    func testNavigationDiagnosticsExposesTraceEvidenceWorkflow() throws {
+    func testNavigationDiagnosticsLivesBehindDeveloperTools() throws {
+        XCTAssertTrue(app.navigationBars["Even G1"].waitForExistence(timeout: 5))
         tapTab(named: "Navigate")
 
-        let diagnosticsButton = app.buttons["navigationDiagnosticsButton"]
-        XCTAssertTrue(diagnosticsButton.waitForExistence(timeout: 5))
-        diagnosticsButton.tap()
-
-        XCTAssertTrue(app.navigationBars["Navigation Diagnostics"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Trace entries"].exists)
-
-        let exportButton = app.buttons["exportNavigationTraceButton"]
-        XCTAssertTrue(exportButton.exists)
-        XCTAssertFalse(exportButton.isEnabled)
-        XCTAssertTrue(app.staticTexts["Start navigation to collect native and fallback transport evidence."].exists)
+        XCTAssertFalse(app.buttons["navigationDiagnosticsButton"].exists)
     }
+
+    // MARK: - Navigate tab
+
+    func testNavigateTabOffersHUDPreviewInsteadOfDiagnostics() throws {
+        tapTab(named: "Navigate")
+
+        let previewButton = app.buttons["navigation.hudPreviewButton"]
+        XCTAssertTrue(previewButton.waitForExistence(timeout: 5))
+        XCTAssertFalse(element(identifier: "navigation.hudPreviewPanel").exists)
+
+        previewButton.tap()
+        XCTAssertTrue(element(identifier: "navigation.hudPreviewPanel").waitForExistence(timeout: 5))
+
+        // No trip is running, so the destructive cancel affordance stays hidden.
+        XCTAssertFalse(app.buttons["navigation.endTripButton"].exists)
+    }
+
+    // MARK: - Heads-Up tab
+
+    func testHeadsUpTabListsWidgetsAndWarnsWhenDisconnected() throws {
+        tapTab(named: "Heads-Up")
+
+        XCTAssertTrue(app.navigationBars["Heads-Up"].waitForExistence(timeout: 5))
+        XCTAssertTrue(element(identifier: "apps.disconnectedNotice").waitForExistence(timeout: 5))
+        XCTAssertTrue(element(identifier: "apps.transitLink").exists)
+        XCTAssertTrue(element(identifier: "apps.notificationsLink").exists)
+        XCTAssertTrue(element(identifier: "apps.notesLink").exists)
+    }
+
+    func testTransitWidgetShowsArrivalControls() throws {
+        tapTab(named: "Heads-Up")
+        element(identifier: "apps.transitLink").tap()
+
+        let statusLabel = element(identifier: "mta.statusLabel")
+        XCTAssertTrue(statusLabel.waitForExistence(timeout: 5))
+
+        let refreshButton = element(identifier: "mta.refreshButton")
+        scrollToElement(refreshButton, maximumSwipes: 10)
+        XCTAssertTrue(refreshButton.exists)
+
+        let autoRefreshToggle = element(identifier: "mta.autoRefreshToggle")
+        scrollToElement(autoRefreshToggle, maximumSwipes: 10)
+        XCTAssertTrue(autoRefreshToggle.exists)
+    }
+
+    func testNotesWidgetRequiresConnectionToSend() throws {
+        tapTab(named: "Heads-Up")
+        element(identifier: "apps.notesLink").tap()
+
+        XCTAssertTrue(app.navigationBars["Notes & Prompts"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["notes.connectRequiredLabel"].waitForExistence(timeout: 5))
+
+        let sendButton = element(identifier: "notes.sendButton")
+        let clearButton = element(identifier: "notes.clearButton")
+        XCTAssertTrue(sendButton.exists)
+        XCTAssertTrue(clearButton.exists)
+        XCTAssertFalse(sendButton.isEnabled)
+        XCTAssertFalse(clearButton.isEnabled)
+    }
+
+    func testNotificationsWidgetRequiresConnectionToSend() throws {
+        tapTab(named: "Heads-Up")
+        element(identifier: "apps.notificationsLink").tap()
+
+        XCTAssertTrue(app.navigationBars["Notifications"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["notifications.connectRequiredLabel"].waitForExistence(timeout: 5))
+
+        let sendButton = element(identifier: "notifications.sendButton")
+        scrollToElement(sendButton, maximumSwipes: 8)
+        XCTAssertTrue(sendButton.exists)
+        XCTAssertFalse(sendButton.isEnabled)
+        XCTAssertTrue(element(identifier: "notifications.titleField").exists)
+        XCTAssertTrue(element(identifier: "notifications.messageField").exists)
+        XCTAssertEqual(element(identifier: "notifications.status").label, "Not sent")
+    }
+
+    // MARK: - Helpers
 
     private func tapTab(named name: String) {
         let tabButton = app.tabBars.buttons[name]
@@ -127,6 +181,23 @@ final class EvenG1SwiftUITests: XCTestCase {
 
     private func element(identifier: String) -> XCUIElement {
         app.descendants(matching: .any)[identifier]
+    }
+
+    private func navigateBack() {
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+    }
+
+    /// A row-wide SwiftUI `Toggle` reports its own frame, so tapping the element
+    /// centre can land on the label. Tap the nested switch control instead.
+    private func setSwitch(_ element: XCUIElement, on: Bool) {
+        guard (element.value as? String) != (on ? "1" : "0") else { return }
+
+        let control = element.switches.firstMatch
+        if control.exists {
+            control.tap()
+        } else {
+            element.tap()
+        }
     }
 
     private func scrollToElement(_ element: XCUIElement, maximumSwipes: Int = 6) {

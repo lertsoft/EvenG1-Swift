@@ -22,6 +22,28 @@ final class DatadogTelemetryTests: XCTestCase {
         XCTAssertEqual(validConfig.environment, "staging")
     }
 
+    func testUnexpandedBuildSettingIsNotTreatedAsACredential() {
+        let placeholderConfig = DatadogConfig(
+            clientToken: "$(DATADOG_CLIENT_TOKEN)",
+            applicationID: "$(DATADOG_APPLICATION_ID)"
+        )
+
+        XCTAssertFalse(placeholderConfig.isValid)
+    }
+
+    func testSiteAcceptsIdentifiersAndOrgDomains() {
+        XCTAssertEqual(DatadogConfig.Site(identifier: "us5"), .us5)
+        XCTAssertEqual(DatadogConfig.Site(identifier: "us5.datadoghq.com"), .us5)
+        XCTAssertEqual(DatadogConfig.Site(identifier: "  EU1  "), .eu1)
+        XCTAssertEqual(DatadogConfig.Site(identifier: "datadoghq.eu"), .eu1)
+        XCTAssertEqual(DatadogConfig.Site(identifier: "ddog-gov.com"), .us1Fed)
+        XCTAssertNil(DatadogConfig.Site(identifier: "us9"))
+    }
+
+    func testDefaultSiteIsUS1WhenUnconfigured() {
+        XCTAssertEqual(DatadogConfig(clientToken: "token", applicationID: "application").site, .us1)
+    }
+
     func testDiagnosticsAreEnabledByDefault() {
         let config = DatadogConfig(clientToken: "token", applicationID: "application")
 

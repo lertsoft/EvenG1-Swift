@@ -6,7 +6,6 @@ struct EvenG1App: App {
     @StateObject private var bluetoothManager = G1BluetoothManager()
 
     init() {
-        // Initialize Datadog RUM, Feature Flags, and Experiments
         DatadogTelemetryService.shared.initialize()
     }
 
@@ -15,7 +14,6 @@ struct EvenG1App: App {
             ContentView()
                 .environmentObject(bluetoothManager)
                 .preferredColorScheme(.dark)
-                .trackDatadogRUMView(name: "MainAppView")
         }
     }
 }

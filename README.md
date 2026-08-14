@@ -1,6 +1,8 @@
 # EvenG1 Swift
 
-An experimental native Swift app for understanding and extending the Even Realities G1 smart-glasses protocol. The project connects to both glasses arms over Bluetooth Low Energy, displays text and 1-bit bitmap content, sends vendor-formatted test notifications, handles microphone and gesture events, shows nearby NYC subway arrivals, and provides phone-driven navigation guidance with a text fallback for unverified native navigation packets.
+A native Swift companion app for the Even Realities G1 smart glasses, built on a reverse-engineered protocol layer. It connects to both glasses arms over Bluetooth Low Energy, displays text and 1-bit bitmap content, sends app-authored notifications, handles microphone and gesture events, shows nearby NYC subway arrivals, and provides phone-driven navigation guidance with a text fallback for unverified native navigation packets.
+
+The app is organized as a consumer product — a device dashboard, navigation, and heads-up widgets — with the protocol tooling that drove the reverse engineering kept behind a developer toggle. See [App structure](#app-structure).
 
 This is a reverse-engineering project, not an official Even Realities product. Protocol behavior can vary by firmware; validate experimental commands on hardware before relying on them.
 
@@ -24,16 +26,68 @@ The app requests Bluetooth and when-in-use location access. The Simulator is use
 
 The bundled privacy manifest declares app-only `UserDefaults` usage under
 Apple's approved `CA92.1` reason. The app does not use tracking domains or an
-advertising identifier, and it does not send analytics to a developer-operated
-service.
+advertising identifier.
+
+## Telemetry
+
+The app reports Real User Monitoring, logs, and crash/hang reports to Datadog
+when credentials are present. Without them the SDK is never initialized and
+every telemetry call is a no-op, so the app sends nothing to a
+developer-operated service by default. Watch for this line in the console to
+confirm which mode a build is in:
+
+```
+Datadog credentials missing or placeholder. Telemetry running in mock mode.
+```
+
+Reporting is enabled by default: the `EvenG1-Swift` target carries a RUM
+application ID and client token for a development organization. A RUM client
+token is write-only and is designed to ship inside app binaries, so it is safe
+to check in — it cannot read data out of Datadog. Point a build at a different
+organization by overriding these build settings, from an untracked `.xcconfig`
+or on the command line in CI:
+
+| Build setting | Required | Notes |
+| --- | --- | --- |
+| `DATADOG_CLIENT_TOKEN` | yes | RUM client token, not an API key |
+| `DATADOG_APPLICATION_ID` | yes | RUM application ID |
+| `DATADOG_SITE` | no | Site identifier (`us5`) or org domain (`us5.datadoghq.com`); defaults to `us1` |
+| `DATADOG_ENV` | no | Set to `DEV` in Debug and `production` in Release |
+| `DATADOG_SERVICE` | no | Defaults to the bundle identifier |
+
+`Info.plist` forwards each setting to the app bundle, and blank or unexpanded
+values are treated as absent so a half-configured build falls back to mock mode
+rather than shipping a bogus credential.
+
+What is collected:
+
+- **RUM views** from `trackDatadogRUMView(name:)` on each tab (`DeviceTab`,
+  `NavigateTab`, `AppsTab`). Automatic SwiftUI
+  view detection is deliberately off: it does not yet suppress views tracked by
+  the modifier, so enabling both would report every screen twice.
+- **RUM actions** automatically, plus custom hardware and experiment events.
+- **RUM resources** for the MTA GTFS-Realtime and station requests, via
+  `URLSession.dataReportingRUMResource(for:)`. These are reported manually because
+  `URLSessionInstrumentation` matches requests by the class of the session delegate,
+  and these clients call async `data(for:)` on a delegate-less session.
+- **Logs** from `G1BluetoothManager`, which mirrors its in-app log ring buffer to
+  Datadog with `component:bluetooth`. Logs carry the active RUM context, so a
+  session in the RUM Explorer links to the Bluetooth logs it produced.
+- **Crashes and app hangs**, symbolicated from uploaded dSYMs.
+
+Feature flags and experiments are evaluated locally, from mock values or the
+caller's default; only the resulting evaluations are sent to Datadog, so they
+correlate with sessions and errors. Serving real values is still an open task.
+The `DatadogFlags` module in SDK 3.x can deliver them through `FlagsClient`,
+which would replace the mock table in `FeatureFlagManager`.
+
+Enabling telemetry means the app collects usage data, which changes what you
+must declare in `PrivacyInfo.xcprivacy` and in App Store privacy answers.
+Revisit both before shipping a build with credentials baked in.
 
 ## Verification
 
-Run the core package tests:
-
-```sh
-swift test
-```
+This project is iOS-only (Datadog RUM requires UIKit). In Xcode, select an iPhone or Simulator destination — not My Mac — then run Product > Test for `EvenG1CoreTests`.
 
 Build the iOS app without code signing:
 
@@ -54,11 +108,36 @@ xcodebuild \
 - `Sources/CLibLC3`: vendored Google liblc3 1.1.3 decoder source (Apache-2.0) used for the G1 microphone's native 20-byte LC3 frames.
 - `EvenG1-Swift`: SwiftUI application, location/search/routing integration, station preferences, bitmap rendering, and microphone audio pipeline.
 - `Tests/EvenG1CoreTests`: deterministic protocol, transport fallback, GTFS parsing, station-cache, and transit-selection tests.
-- Navigate's waveform diagnostics sheet previews the current transport/session
-  state and exports bounded navigation traces as chronological `.jsonl` evidence.
 - `RESEARCH`: protocol evidence, unresolved assumptions, and the physical-device navigation validation matrix.
 
 The G1 uses two BLE peripherals, one per arm, over the Nordic UART service. Commands normally flow to the left arm and then the right after acknowledgment. Explicitly side-specific operations, such as microphone activation, use the documented side-specific path first.
+
+## App structure
+
+Three consumer tabs, with every engineering surface behind a developer toggle:
+
+| Tab | Contents |
+| --- | --- |
+| **Device** (`EvenG1-Swift/Device`) | Connection hero with per-arm battery, one connect action, silent-mode and brightness controls, Glasses Configuration, Support & Diagnostics |
+| **Navigate** (`EvenG1-Swift/Navigate`) | Search, route preview, turn-by-turn guidance, confirmed trip cancellation, and an optional on-screen preview of the glasses HUD |
+| **Heads-Up** (`EvenG1-Swift/Apps`) | Transit arrivals, app-authored notifications, and notes/prompts, each as a self-contained widget |
+
+`Device > Support & Diagnostics` exports a single text report — connection state,
+log ring buffer, gesture events, and navigation trace — for troubleshooting, and
+hosts the **Developer Mode** toggle. Enabling it adds `Device > Developer Tools`
+with the raw UART log and event inspector, the navigation transport trace and its
+`.jsonl` evidence export, microphone and LC3 codec counters, text-transport
+fixtures, and a reference for the vendor byte commands. The flag is persisted but
+forced off under `--ui-testing` so UI tests always start from a consumer build.
+
+`GlassesHUDPreview` (`EvenG1-Swift/Shared`) renders content at the display's real
+576×135 pixel size, so previews wrap and truncate the way the glasses will. The
+transit widget previews the exact bitmap it sends by sharing
+`MTABitmapRenderer.renderImage(page:)` with the transport path.
+
+Connection is automatic: the app restores the last known pair as soon as the
+Bluetooth radio reports ready, so `connectToPreferredGlasses()` only has to fall
+back to scanning when no pair is remembered.
 
 ## Reference documentation
 

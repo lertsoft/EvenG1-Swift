@@ -296,6 +296,26 @@ enum MTABitmapRendererError: Error {
 
 struct MTABitmapRenderer {
     func render(page: MTAVisualPage) throws -> G1BitmapFrame {
+        let image = renderImage(page: page)
+
+        guard let cgImage = image.cgImage else {
+            throw MTABitmapRendererError.imageBuildFailed
+        }
+
+        guard let packed = Self.packMonochromeBits(from: cgImage) else {
+            throw MTABitmapRendererError.bitmapPackFailed
+        }
+
+        return try G1BitmapFrame(
+            width: G1BitmapFrame.defaultWidth,
+            height: G1BitmapFrame.defaultHeight,
+            bitPackedRows: packed
+        )
+    }
+
+    /// Renders the page at true display resolution. The in-app HUD preview draws
+    /// this image directly so it cannot drift from what the glasses receive.
+    func renderImage(page: MTAVisualPage) -> UIImage {
         let width = G1BitmapFrame.defaultWidth
         let height = G1BitmapFrame.defaultHeight
         let size = CGSize(width: width, height: height)
@@ -305,7 +325,7 @@ struct MTABitmapRenderer {
         format.opaque = true
 
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
-        let image = renderer.image { context in
+        return renderer.image { context in
             UIColor.black.setFill()
             context.fill(CGRect(origin: .zero, size: size))
 
@@ -371,16 +391,6 @@ struct MTABitmapRenderer {
                 withAttributes: subAttrs
             )
         }
-
-        guard let cgImage = image.cgImage else {
-            throw MTABitmapRendererError.imageBuildFailed
-        }
-
-        guard let packed = Self.packMonochromeBits(from: cgImage) else {
-            throw MTABitmapRendererError.bitmapPackFailed
-        }
-
-        return try G1BitmapFrame(width: width, height: height, bitPackedRows: packed)
     }
 
     private func rowLineText(_ row: MTAVisualRow) -> String {

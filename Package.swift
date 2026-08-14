@@ -4,8 +4,7 @@ import PackageDescription
 let package = Package(
     name: "EvenG1",
     platforms: [
-        .iOS(.v17),
-        .macOS(.v14)
+        .iOS(.v17)
     ],
     products: [
         .library(
@@ -15,7 +14,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.38.1"),
-        .package(url: "https://github.com/Datadog/dd-sdk-ios.git", from: "2.14.0")
+        .package(url: "https://github.com/Datadog/dd-sdk-ios.git", .upToNextMajor(from: "3.0.0"))
     ],
     targets: [
         .target(
@@ -34,6 +33,7 @@ let package = Package(
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
                 .product(name: "DatadogCore", package: "dd-sdk-ios"),
                 .product(name: "DatadogRUM", package: "dd-sdk-ios"),
+                .product(name: "DatadogLogs", package: "dd-sdk-ios"),
                 .product(name: "DatadogCrashReporting", package: "dd-sdk-ios")
             ],
             path: "Sources/EvenG1Core"

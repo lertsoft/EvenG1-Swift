@@ -20,6 +20,16 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>DATADOG_APPLICATION_ID</key>
+	<string>$(DATADOG_APPLICATION_ID)</string>
+	<key>DATADOG_CLIENT_TOKEN</key>
+	<string>$(DATADOG_CLIENT_TOKEN)</string>
+	<key>DATADOG_ENV</key>
+	<string>$(DATADOG_ENV)</string>
+	<key>DATADOG_SERVICE</key>
+	<string>$(DATADOG_SERVICE)</string>
+	<key>DATADOG_SITE</key>
+	<string>$(DATADOG_SITE)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
