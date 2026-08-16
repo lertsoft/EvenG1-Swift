@@ -106,6 +106,7 @@ public enum G1DeviceEvent: UInt8 {
     case TRIPLE_TAP_ALT = 0x05
     
     case CASE_BATTERY = 0x0F
+    case GLASSES_BATTERY = 0x0A
     case PAIRED_SUCCESS = 0x11
     
     case PRESS_AND_HOLD = 0x17

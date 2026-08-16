@@ -40,6 +40,10 @@ final class NavigationViewModel: ObservableObject {
 
     @Published private(set) var favorites: [NavigationFavorite] = []
 
+    var canStartTurnByTurn: Bool {
+        currentPlan?.route != nil
+    }
+
     private let searchService: MapSearchService
     private let routePlanner: RoutePlanner
     private let routeTracker: RouteTracker
@@ -133,6 +137,22 @@ final class NavigationViewModel: ObservableObject {
         if let item = favorite.toMapItem() {
             await previewRoute(to: item)
         }
+    }
+
+    func previewFavorite(named name: String) async {
+        guard let favorite = favorite(named: name) else { return }
+        await previewFavorite(favorite)
+    }
+
+    func startNavigationToFavorite(named name: String) async {
+        guard let favorite = favorite(named: name) else { return }
+        guard let item = favorite.toMapItem() else {
+            state = .error("\(favorite.title) does not have a saved location.")
+            return
+        }
+        await previewRoute(to: item)
+        guard state == .routePreview, canStartTurnByTurn else { return }
+        await startNavigation()
     }
 
     func previewRoute(to destination: MKMapItem) async {
@@ -667,8 +687,21 @@ final class NavigationViewModel: ObservableObject {
     private func subtitleForPreview(_ plan: NavigationRoutePlan) -> String {
         let distance = Int(plan.estimatedDistanceMeters)
         let minutes = Int(max(1, plan.estimatedDurationSeconds / 60))
-
+        if plan.mode == .transit, !plan.hasInAppRoute {
+            return "Transit ETA · \(minutes)m · open Transit for NYC arrivals"
+        }
         return "\(plan.mode.displayName) · \(distance)m · \(minutes)m"
+    }
+
+    private func favorite(named name: String) -> NavigationFavorite? {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let favorite = favorites.first(where: {
+            $0.title.localizedCaseInsensitiveCompare(normalized) == .orderedSame
+        }) else {
+            state = .error("No saved destination named \(normalized).")
+            return nil
+        }
+        return favorite
     }
 
     private func userFacingError(_ error: Error) -> String {

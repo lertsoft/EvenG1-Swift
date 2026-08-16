@@ -46,12 +46,12 @@ struct TransitWidgetView: View {
         }
         .onAppear {
             viewModel.bind(bluetoothManager: bluetoothManager)
-            viewModel.setWidgetActive(true)
         }
         .onDisappear {
-            viewModel.setWidgetActive(false)
+            viewModel.deactivateWidget()
         }
         .task {
+            await viewModel.activateWidget()
             if viewModel.selectedStation == nil, !viewModel.isRefreshing {
                 await viewModel.refreshNow(trigger: .manualButton)
             }

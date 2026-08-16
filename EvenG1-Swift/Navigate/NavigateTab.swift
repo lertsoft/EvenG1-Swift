@@ -4,6 +4,7 @@ import EvenG1Core
 
 struct NavigateTab: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
+    @EnvironmentObject private var appActionRouter: AppActionRouter
 
     let isActive: Bool
 
@@ -73,6 +74,10 @@ struct NavigateTab: View {
                 Task {
                     await viewModel.handleGlassesEvent(latest)
                 }
+            }
+            .onChange(of: appActionRouter.favoriteNavigationRevision) { _, _ in
+                guard let name = appActionRouter.favoriteNavigationRequest else { return }
+                Task { await viewModel.startNavigationToFavorite(named: name) }
             }
             .alert("Remove Favorite", isPresented: Binding(
                 get: { selectedFavoriteForRemoval != nil },
@@ -434,10 +439,16 @@ struct NavigateTab: View {
                 Button {
                     Task { await viewModel.startNavigation() }
                 } label: {
-                    Label("Start", systemImage: "arrow.triangle.turn.up.right.circle.fill")
+                    Label(
+                        viewModel.canStartTurnByTurn ? "Start" : "ETA only",
+                        systemImage: viewModel.canStartTurnByTurn
+                            ? "arrow.triangle.turn.up.right.circle.fill"
+                            : "tram.fill"
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.cyan)
+                .disabled(!viewModel.canStartTurnByTurn)
 
             case .navigating, .rerouting:
                 Button {

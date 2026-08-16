@@ -6,6 +6,9 @@ import EvenG1Core
 /// tab rather than in this tab bar.
 struct ContentView: View {
     @EnvironmentObject var bluetoothManager: G1BluetoothManager
+    @EnvironmentObject var voiceCoordinator: GlassesVoiceCoordinator
+    @EnvironmentObject var appActionRouter: AppActionRouter
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var developerSettings = DeveloperSettings()
 
     /// Owned here so transit state survives navigating between tabs.
@@ -40,6 +43,8 @@ struct ContentView: View {
         .environmentObject(developerSettings)
         .onAppear {
             transitViewModel.bind(bluetoothManager: bluetoothManager)
+            voiceCoordinator.bind(to: bluetoothManager)
+            Task { await processPendingAppAction() }
         }
         .onChange(of: selectedTab) { _, newTab in
             let tabName = ["device", "navigate", "heads_up"][safe: newTab] ?? "unknown"
@@ -54,7 +59,43 @@ struct ContentView: View {
             }
 
             Task {
-                await transitViewModel.handleGlassesEvent(latestEvent)
+                if case .pressAndHold = latestEvent,
+                   appActionRouter.isTranslationForeground {
+                    appActionRouter.requestTranslationStart()
+                    return
+                }
+                let consumed = await voiceCoordinator.handleGlassesEvent(latestEvent)
+                if !consumed {
+                    await transitViewModel.handleGlassesEvent(latestEvent)
+                }
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await processPendingAppAction() }
+        }
+    }
+
+    @MainActor
+    private func processPendingAppAction() async {
+        guard let action = PendingAppActionStore.consume() else { return }
+        switch action.kind {
+        case .startFavoriteNavigation:
+            selectedTab = 1
+            if let name = action.value {
+                appActionRouter.requestFavoriteNavigation(named: name)
+            }
+        case .nextTrain:
+            selectedTab = 2
+            await transitViewModel.refreshNow(trigger: .manualButton)
+        case .startTranslation:
+            selectedTab = 2
+            appActionRouter.requestTranslationStart()
+        case .stopTranslation:
+            await voiceCoordinator.stopTranslation()
+        case .sendNote:
+            if let note = action.value?.trimmingCharacters(in: .whitespacesAndNewlines), !note.isEmpty {
+                bluetoothManager.sendText(note)
             }
         }
     }
@@ -69,4 +110,6 @@ private extension Collection {
 #Preview {
     ContentView()
         .environmentObject(G1BluetoothManager())
+        .environmentObject(GlassesVoiceCoordinator())
+        .environmentObject(AppActionRouter())
 }

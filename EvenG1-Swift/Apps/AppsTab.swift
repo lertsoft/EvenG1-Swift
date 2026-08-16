@@ -6,10 +6,12 @@ import EvenG1Core
 /// a row here rather than another section on a shared scroll view.
 struct AppsTab: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
+    @EnvironmentObject private var appActionRouter: AppActionRouter
     @ObservedObject var transitViewModel: MTATrainViewModel
+    @State private var path = NavigationPath()
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(spacing: 16) {
                     if bluetoothManager.connectionState != .fullyConnected {
@@ -40,6 +42,16 @@ struct AppsTab: View {
                     }
                     .accessibilityIdentifier("apps.notificationsLink")
 
+                    NavigationLink(value: HeadsUpDestination.translate) {
+                        HUDAppCard(
+                            title: "Translate",
+                            subtitle: "Live translated captions from the glasses mic",
+                            icon: "translate",
+                            tint: .green
+                        )
+                    }
+                    .accessibilityIdentifier("apps.translateLink")
+
                     NavigationLink {
                         NotesWidgetView()
                     } label: {
@@ -57,9 +69,27 @@ struct AppsTab: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Heads-Up")
             .navigationBarTitleDisplayMode(.large)
+            .navigationDestination(for: HeadsUpDestination.self) { destination in
+                switch destination {
+                case .translate:
+                    if #available(iOS 18.0, *) {
+                        TranslateWidgetView()
+                    } else {
+                        ContentUnavailableView(
+                            "Translation Requires iOS 18",
+                            systemImage: "translate",
+                            description: Text("Update iOS to use Apple's on-device Translation framework.")
+                        )
+                    }
+                }
+            }
         }
         .onAppear {
             transitViewModel.bind(bluetoothManager: bluetoothManager)
+        }
+        .onChange(of: appActionRouter.translationStartRevision) { _, _ in
+            path = NavigationPath()
+            path.append(HeadsUpDestination.translate)
         }
     }
 
@@ -69,6 +99,10 @@ struct AppsTab: View {
         }
         return "Next trains at your station"
     }
+}
+
+private enum HeadsUpDestination: Hashable {
+    case translate
 }
 
 private struct DisconnectedNotice: View {

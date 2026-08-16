@@ -815,20 +815,34 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Clear the glasses display
     public func clearDisplay() {
         Task {
-            guard await displayCommandGate.acquire(), !Task.isCancelled else { return }
-            defer { displayCommandGate.release() }
-
-            let exitCommand = Data([G1Command.EXIT_ALL.rawValue])
-            let acked = await sendCommandAwaitAck(
-                exitCommand,
-                timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
-            )
-            if acked {
-                log("Display cleared", level: .info)
-            } else {
-                log("Exit-all command was not acknowledged", level: .warning)
-            }
+            _ = await clearDisplayAndWait()
         }
+    }
+
+    /// Clear the display and wait until the exit command has completed. This
+    /// is used when one feature hands the lens to another so the old frame
+    /// cannot race and reappear after the new feature starts.
+    @discardableResult
+    public func clearDisplayAndWait() async -> Bool {
+        guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { displayCommandGate.release() }
+
+        guard connectionState == .fullyConnected else {
+            log("Cannot clear display: Not fully connected", level: .warning)
+            return false
+        }
+
+        let exitCommand = Data([G1Command.EXIT_ALL.rawValue])
+        let acked = await sendCommandAwaitAck(
+            exitCommand,
+            timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
+        )
+        if acked {
+            log("Display cleared", level: .info)
+        } else {
+            log("Exit-all command was not acknowledged", level: .warning)
+        }
+        return acked
     }
 
     /// Configure the vendor notification whitelist on the left arm.

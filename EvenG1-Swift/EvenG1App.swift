@@ -4,6 +4,8 @@ import EvenG1Core
 @main
 struct EvenG1App: App {
     @StateObject private var bluetoothManager = G1BluetoothManager()
+    @StateObject private var voiceCoordinator = GlassesVoiceCoordinator()
+    @StateObject private var appActionRouter = AppActionRouter()
 
     init() {
         DatadogTelemetryService.shared.initialize()
@@ -13,6 +15,8 @@ struct EvenG1App: App {
         WindowGroup {
             ContentView()
                 .environmentObject(bluetoothManager)
+                .environmentObject(voiceCoordinator)
+                .environmentObject(appActionRouter)
                 .preferredColorScheme(.dark)
         }
     }

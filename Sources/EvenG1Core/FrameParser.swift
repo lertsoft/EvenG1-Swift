@@ -139,7 +139,11 @@ public final class G1FrameParser: @unchecked Sendable {
             return parseStatusResponse(from: frame)
 
         case .DEVICE_EVENT:
-            return parseDeviceEventPayload(frame.payload, sourceCommand: frame.commandByte)
+            return parseDeviceEventPayload(
+                frame.payload,
+                sourceCommand: frame.commandByte,
+                side: frame.side
+            )
             
         case .BATTERY:
             return parseBatteryResponse(from: frame, side: frame.side)
@@ -173,21 +177,37 @@ public final class G1FrameParser: @unchecked Sendable {
         guard !payload.isEmpty else { return nil }
 
         if payload[0] == G1Command.DEVICE_EVENT.rawValue {
-            return parseDeviceEventPayload(Data(payload.dropFirst()), sourceCommand: frame.commandByte)
+            return parseDeviceEventPayload(
+                Data(payload.dropFirst()),
+                sourceCommand: frame.commandByte,
+                side: frame.side
+            )
         }
 
         if payload.count >= 2 && payload[1] == G1Command.DEVICE_EVENT.rawValue {
-            return parseDeviceEventPayload(Data(payload.dropFirst(2)), sourceCommand: frame.commandByte)
+            return parseDeviceEventPayload(
+                Data(payload.dropFirst(2)),
+                sourceCommand: frame.commandByte,
+                side: frame.side
+            )
         }
 
         if let index = payload.firstIndex(of: G1Command.DEVICE_EVENT.rawValue),
            index < payload.index(before: payload.endIndex) {
             let nestedStart = payload.index(after: index)
-            return parseDeviceEventPayload(Data(payload[nestedStart...]), sourceCommand: frame.commandByte)
+            return parseDeviceEventPayload(
+                Data(payload[nestedStart...]),
+                sourceCommand: frame.commandByte,
+                side: frame.side
+            )
         }
 
         // Some firmware sends the status command with direct event code payload.
-        if let event = parseDeviceEventCode(payload[0], remainingPayload: Data(payload.dropFirst())) {
+        if let event = parseDeviceEventCode(
+            payload[0],
+            remainingPayload: Data(payload.dropFirst()),
+            side: frame.side
+        ) {
             return event
         }
 
@@ -195,19 +215,27 @@ public final class G1FrameParser: @unchecked Sendable {
     }
 
     /// Parse 0xF5 device event payload bytes.
-    private func parseDeviceEventPayload(_ payload: Data, sourceCommand: UInt8) -> G1Event? {
+    private func parseDeviceEventPayload(_ payload: Data,
+                                         sourceCommand: UInt8,
+                                         side: GlassesSide) -> G1Event? {
         guard !payload.isEmpty else { return nil }
         let eventCode = payload[0]
         let remainingPayload = Data(payload.dropFirst())
 
-        if let event = parseDeviceEventCode(eventCode, remainingPayload: remainingPayload) {
+        if let event = parseDeviceEventCode(
+            eventCode,
+            remainingPayload: remainingPayload,
+            side: side
+        ) {
             return event
         }
 
         return unknownEvent(command: sourceCommand, payload: payload)
     }
 
-    private func parseDeviceEventCode(_ eventCode: UInt8, remainingPayload: Data) -> G1Event? {
+    private func parseDeviceEventCode(_ eventCode: UInt8,
+                                      remainingPayload: Data,
+                                      side: GlassesSide) -> G1Event? {
         switch eventCode {
         case G1DeviceEvent.SINGLE_TAP.rawValue:
             return .singleTap
@@ -238,6 +266,11 @@ public final class G1FrameParser: @unchecked Sendable {
         case G1DeviceEvent.CASE_BATTERY.rawValue:
             if let level = remainingPayload.first {
                 return .caseBattery(level: Int(level))
+            }
+            return nil
+        case G1DeviceEvent.GLASSES_BATTERY.rawValue:
+            if let level = remainingPayload.first {
+                return .batteryUpdate(side: side, level: Int(level))
             }
             return nil
         case G1DeviceEvent.PAIRED_SUCCESS.rawValue:

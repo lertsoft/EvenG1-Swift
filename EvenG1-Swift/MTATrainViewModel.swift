@@ -86,9 +86,27 @@ final class MTATrainViewModel: ObservableObject {
 
     /// Whether the transit widget is on screen. Gates auto-refresh and glasses
     /// gestures so the widget never fights another feature for the display.
-    func setWidgetActive(_ isActive: Bool) {
-        isWidgetActive = isActive
+    func activateWidget() async {
+        isWidgetActive = true
         updateAutoRefreshTask()
+        if let bluetoothManager,
+           bluetoothManager.connectionState == .fullyConnected {
+            // A custom app owns head-up while it is active. Disable the stock
+            // firmware dashboard so it cannot cover the transit bitmap, while
+            // retaining app-side head-up/head-down events.
+            _ = await bluetoothManager.configureTiltDashboard(
+                G1TiltDashboardConfig(enabled: true, headUpMode: .off, appEventFallback: true)
+            )
+            _ = await bluetoothManager.clearDisplayAndWait()
+        }
+    }
+
+    func deactivateWidget() {
+        isWidgetActive = false
+        updateAutoRefreshTask()
+        // Bitmap frames stay latched after this screen disappears. Releasing
+        // the display prevents transit from covering the next custom app.
+        bluetoothManager?.clearDisplay()
     }
 
     func setAutoRefreshEnabled(_ enabled: Bool) {
@@ -244,12 +262,20 @@ final class MTATrainViewModel: ObservableObject {
         switch event {
         case .doubleTap:
             await refreshNow(trigger: .doubleTapGesture)
-        case .headUp:
+        case .headUp, .tripleTap:
             let now = Date()
             if let lastTiltRefreshAt, now.timeIntervalSince(lastTiltRefreshAt) < tiltRefreshDebounceSeconds {
                 return
             }
             lastTiltRefreshAt = now
+
+            // Put the cached board on the lens immediately; a location/feed
+            // refresh can take seconds and should not make the gesture appear
+            // unresponsive.
+            if !currentPages.isEmpty {
+                await sendCurrentPageToGlassesIfConnected()
+                return
+            }
             await refreshNow(trigger: .headTiltGesture)
         case .headDown:
             bluetoothManager?.clearDisplay()

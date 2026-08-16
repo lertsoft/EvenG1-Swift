@@ -56,6 +56,26 @@ final class G1ProtocolCompatibilityTests: XCTestCase {
         }
     }
 
+    func testGlassesBatteryDeviceEventUsesFrameSide() {
+        let parser = G1FrameParser()
+        let frame = parser.parseFrame(
+            data: Data([
+                G1Command.DEVICE_EVENT.rawValue,
+                G1DeviceEvent.GLASSES_BATTERY.rawValue,
+                100,
+                0,
+                0
+            ]),
+            side: .right
+        )
+
+        guard case let .batteryUpdate(side, level)? = parser.parseEvent(from: frame) else {
+            return XCTFail("Expected a glasses battery event")
+        }
+        XCTAssertEqual(side, .right)
+        XCTAssertEqual(level, 100)
+    }
+
     func testUnknownEventIncludesPayloadMetadata() {
         let parser = G1FrameParser()
         parser.protocolMode = .auto
