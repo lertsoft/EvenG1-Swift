@@ -717,9 +717,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
         _ = await ensureCustomDisplaySurfaceVisible()
 
-        let preview = request.text.prefix(30)
-        let suffix = request.text.count > 30 ? "..." : ""
-        log("Sending \(request.mode.displayName) text: \"\(preview)\(suffix)\" (packets: \(packets.count), ack: \(request.awaitAck))", level: .info)
+        // Notification and navigation text can contain private content.
+        // Retain delivery dimensions without shipping the body remotely.
+        log("Sending \(request.mode.displayName) text (characters: \(request.text.count), packets: \(packets.count), ack: \(request.awaitAck))", level: .info)
 
         for (index, packet) in packets.enumerated() {
             guard !Task.isCancelled else {
@@ -860,11 +860,18 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     }
 
     /// Clear the glasses display and return only after the display command gate
-    /// has serialized the operation with any in-flight bitmap upload.
+    /// has serialized the operation with any in-flight bitmap upload. Also used
+    /// when one feature hands the lens to another so the old frame cannot race
+    /// and reappear after the new feature starts.
     @discardableResult
     public func clearDisplayAwaitingCompletion() async -> Bool {
         guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
         defer { displayCommandGate.release() }
+
+        guard connectionState == .fullyConnected else {
+            log("Cannot clear display: Not fully connected", level: .warning)
+            return false
+        }
 
         let exitCommand = Data([G1Command.EXIT_ALL.rawValue])
         let acked = await sendCommandAwaitAck(
@@ -877,6 +884,12 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             log("Exit-all command was not acknowledged", level: .warning)
         }
         return acked
+    }
+
+    /// Backwards-compatible alias for `clearDisplayAwaitingCompletion()`.
+    @discardableResult
+    public func clearDisplayAndWait() async -> Bool {
+        await clearDisplayAwaitingCompletion()
     }
 
     /// Configure the vendor notification whitelist on the left arm.
@@ -1977,6 +1990,13 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             message,
             attributes: ["component": "bluetooth"]
         )
+        if level == .error {
+            DatadogTelemetryService.shared.trackError(
+                message: message,
+                type: "BluetoothError",
+                attributes: ["component": "bluetooth"]
+            )
+        }
     }
     
     private func addEvent(_ event: G1Event) {
@@ -2128,6 +2148,10 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         
         log("🎉 Glasses fully connected!", level: .success)
         connectionState = .fullyConnected
+        DatadogTelemetryService.shared.trackHardwareEvent(
+            name: "connection",
+            state: "connected"
+        )
         stopReconnectionTimer()
         reconnectionAttempts = 0
         isReconnecting = false
@@ -2366,6 +2390,15 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         }
         
         updateConnectionState()
+        DatadogTelemetryService.shared.trackHardwareEvent(
+            name: "connection",
+            state: "disconnected",
+            attributes: [
+                "glasses.side": side.rawValue,
+                "connection.unexpected": !isIntentionalDisconnect,
+                "connection.has_error": error != nil
+            ]
+        )
         
         // Attempt reconnection if not intentional
         if !isIntentionalDisconnect && autoReconnect {

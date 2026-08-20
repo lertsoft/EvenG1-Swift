@@ -36,10 +36,10 @@ public struct G1NavigationGestureMapper {
             return nil
         case .tripleTap:
             return .recenterToLiveStep
-        case .pressAndHold:
-            return .endNavigation
-        case .pressAndRelease:
-            return .toggleMute
+        case .pressAndHold, .pressAndRelease:
+            // Reserved globally for the voice assistant. Navigation must not
+            // also react to the same physical gesture.
+            return nil
         case .headUp:
             return .showOverlay
         case .headDown:

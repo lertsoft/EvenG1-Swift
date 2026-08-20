@@ -70,10 +70,11 @@ What is collected:
   `URLSession.dataReportingRUMResource(for:)`. These are reported manually because
   `URLSessionInstrumentation` matches requests by the class of the session delegate,
   and these clients call async `data(for:)` on a delegate-less session.
-- **Logs** from `G1BluetoothManager`, which mirrors its in-app log ring buffer to
-  Datadog with `component:bluetooth`. Logs carry the active RUM context, so a
-  session in the RUM Explorer links to the Bluetooth logs it produced.
-- **Crashes and app hangs**, symbolicated from uploaded dSYMs.
+- **Logs** at every severity from the Bluetooth, experiment, navigation,
+  transit, notification, navigation, and search text is deliberately excluded.
+- **Handled errors** from recoverable navigation, transit, search, audio, and
+  Bluetooth failures, reported to both Logs and RUM Error Tracking.
+- **Crashes, memory warnings, watchdog terminations, and app hangs**.
 
 Feature flags and experiments are evaluated locally, from mock values or the
 caller's default; only the resulting evaluations are sent to Datadog, so they
@@ -144,6 +145,15 @@ Three consumer tabs, with every engineering surface behind a developer toggle:
 | **Device** (`EvenG1-Swift/Device`) | Connection hero with per-arm battery, one connect action, silent-mode and brightness controls, Glasses Configuration, Support & Diagnostics |
 | **Navigate** (`EvenG1-Swift/Navigate`) | Search, route preview, turn-by-turn guidance, confirmed trip cancellation, and an optional on-screen preview of the glasses HUD |
 | **Heads-Up** (`EvenG1-Swift/Apps`) | Transit arrivals, app-authored notifications, and notes/prompts, each as a self-contained widget |
+
+## Apple-native intelligence and voice
+
+- **Translate (iOS 18+)** decodes the G1's native LC3 microphone stream, uses Apple Speech recognition, translates finalized phrases with Apple's on-device Translation framework, and pages the result on the glasses. Required language assets are prepared through the system download flow.
+- **EvenG1 Assistant (iOS 26+)** starts when the user holds the glasses side button and submits the finalized transcript to Apple's on-device Foundation Models framework. On older or ineligible devices, EvenG1 keeps Apple speech/translation features but reports why general AI answers are unavailable.
+- **Siri and Shortcuts** expose navigation to a saved favorite, next-train refresh, translation start/stop, and sending a note to the glasses through App Intents. iOS opens EvenG1 for actions that need Bluetooth, location, speech permission, or a foreground translation session.
+- Voice audio, transcripts, translations, prompts, and answers are not included in telemetry.
+
+MapKit remains the embedded navigation provider. Walking and cycling use Apple's route server and retain the selected route in memory so active GPS guidance can continue through a temporary network loss. Embedded MapKit only exposes public-transit ETA calculations—not Apple Maps' complete transit itinerary—so the Navigate tab labels transit as ETA-only and directs detailed NYC arrival work to the existing MTA realtime experience.
 
 `Device > Support & Diagnostics` exports a single text report — connection state,
 log ring buffer, gesture events, and navigation trace — for troubleshooting, and

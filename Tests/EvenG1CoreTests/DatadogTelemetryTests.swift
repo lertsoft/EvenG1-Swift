@@ -48,9 +48,12 @@ final class DatadogTelemetryTests: XCTestCase {
         let config = DatadogConfig(clientToken: "token", applicationID: "application")
 
         XCTAssertTrue(config.trackWatchdogTerminations)
+        XCTAssertTrue(config.trackAnonymousUser)
+        XCTAssertTrue(config.trackMemoryWarnings)
         XCTAssertEqual(config.longTaskThreshold, 0.25)
         XCTAssertEqual(config.appHangThreshold, 2.0)
         XCTAssertEqual(config.vitalsUpdateFrequency, .frequent)
+        XCTAssertEqual(config.logsRemoteThreshold, .debug)
     }
 
     func testTrackTimingDoesNotCrashInMockMode() {

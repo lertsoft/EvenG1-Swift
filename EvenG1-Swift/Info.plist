@@ -36,6 +36,15 @@
 	<string>EvenG1 connects to your Even Realities G1 glasses over Bluetooth.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>EvenG1 uses your location to plan routes, provide live navigation directions, and find nearby transit.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>EvenG1 transcribes audio from your glasses for voice assistance and translated captions.</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict/>
+	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>
@@ -43,13 +52,6 @@
 	<key>UIStatusBarStyle</key>
 	<string>UIStatusBarStyleDefault</string>
 	<key>UISupportedInterfaceOrientations</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationPortraitUpsideDown</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
-	</array>
-	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>

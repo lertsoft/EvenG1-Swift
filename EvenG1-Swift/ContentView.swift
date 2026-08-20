@@ -8,6 +8,8 @@ struct ContentView: View {
     @EnvironmentObject var bluetoothManager: G1BluetoothManager
     @EnvironmentObject private var glassesEvents: G1GlassesEventNotifier
     @EnvironmentObject private var notificationMirror: NotificationMirrorViewModel
+    @EnvironmentObject var voiceCoordinator: GlassesVoiceCoordinator
+    @EnvironmentObject var appActionRouter: AppActionRouter
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var developerSettings = DeveloperSettings()
 
@@ -37,8 +39,17 @@ struct ContentView: View {
             .onChange(of: transitViewModel.selectedStation?.stationName) { _, _ in
                 syncTransitCatalogSubtitle()
             }
-            .onChange(of: selectedTab) { _, _ in
+            .onChange(of: selectedTab) { _, newTab in
                 DatadogTelemetryService.shared.trackTiming(name: "tab_switch_first_frame")
+                let tabName = ["device", "navigate", "heads_up"][safe: newTab] ?? "unknown"
+                DatadogTelemetryService.shared.trackProductEvent(
+                    name: "tab_selected",
+                    attributes: ["tab.name": tabName]
+                )
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await processPendingAppAction() }
             }
             .onChange(of: glassesEvents.revision) { _, _ in
                 guard let latestEvent = glassesEvents.latestEvent else {
@@ -79,16 +90,24 @@ struct ContentView: View {
 
     private func handleAppear() {
         transitViewModel.bind(bluetoothManager: bluetoothManager)
+        voiceCoordinator.bind(to: bluetoothManager)
         notificationMirror.bind(bluetoothManager: bluetoothManager)
         notificationMirror.setAppActive(scenePhase == .active)
         notificationMirror.setNavigationSessionState(bluetoothManager.navigationSessionState)
         notificationMirror.setConnected(bluetoothManager.connectionState == .fullyConnected)
         syncTransitCatalogSubtitle()
+        Task { await processPendingAppAction() }
     }
 
     /// Head gestures are the only events several features want at once, so they go
     /// to a single owner. Everything else keeps its previous routing.
     private func routeGlassesEvent(_ event: G1Event) {
+        // Translation owns press-and-hold while its screen is foregrounded.
+        if case .pressAndHold = event, appActionRouter.isTranslationForeground {
+            appActionRouter.requestTranslationStart()
+            return
+        }
+
         if G1LensSurfaceArbiter.isContendedGesture(event) {
             let owner = G1LensSurfaceArbiter.headGestureOwner(
                 navigationSessionState: bluetoothManager.navigationSessionState,
@@ -109,7 +128,10 @@ struct ContentView: View {
         }
 
         Task {
-            await transitViewModel.handleGlassesEvent(event)
+            let consumed = await voiceCoordinator.handleGlassesEvent(event)
+            if !consumed {
+                await transitViewModel.handleGlassesEvent(event)
+            }
         }
     }
 
@@ -119,6 +141,36 @@ struct ContentView: View {
         } else {
             transitCatalogSubtitle = "Next trains at your station"
         }
+    }
+
+    @MainActor
+    private func processPendingAppAction() async {
+        guard let action = PendingAppActionStore.consume() else { return }
+        switch action.kind {
+        case .startFavoriteNavigation:
+            selectedTab = 1
+            if let name = action.value {
+                appActionRouter.requestFavoriteNavigation(named: name)
+            }
+        case .nextTrain:
+            selectedTab = 2
+            await transitViewModel.refreshNow(trigger: .manualButton)
+        case .startTranslation:
+            selectedTab = 2
+            appActionRouter.requestTranslationStart()
+        case .stopTranslation:
+            await voiceCoordinator.stopTranslation()
+        case .sendNote:
+            if let note = action.value?.trimmingCharacters(in: .whitespacesAndNewlines), !note.isEmpty {
+                bluetoothManager.sendText(note)
+            }
+        }
+    }
+}
+
+private extension Collection {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 
@@ -152,4 +204,6 @@ private struct NotificationMirrorLifecycle: ViewModifier {
         .environmentObject(bluetoothManager.diagnostics)
         .environmentObject(bluetoothManager.glassesEvents)
         .environmentObject(NotificationMirrorViewModel())
+        .environmentObject(GlassesVoiceCoordinator())
+        .environmentObject(AppActionRouter())
 }

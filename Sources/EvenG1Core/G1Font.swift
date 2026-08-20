@@ -107,11 +107,13 @@ public final class G1TextHelper: @unchecked Sendable {
     /// Get the pixel width of a string
     public func stringWidth(_ text: String) -> Int {
         var width = 0
-        for (index, char) in text.enumerated() {
-            width += charWidth(char)
-            if index < text.count - 1 {
+        var isFirstCharacter = true
+        for char in text {
+            if !isFirstCharacter {
                 width += Self.charSpacing
             }
+            width += charWidth(char)
+            isFirstCharacter = false
         }
         return width
     }

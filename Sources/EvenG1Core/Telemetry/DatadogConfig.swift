@@ -27,6 +27,8 @@ public struct DatadogConfig: Sendable {
     public var telemetrySampleRate: Float
     public var trackBackgroundEvents: Bool
     public var trackWatchdogTerminations: Bool
+    public var trackAnonymousUser: Bool
+    public var trackMemoryWarnings: Bool
     public var longTaskThreshold: TimeInterval?
     public var appHangThreshold: TimeInterval?
     public var vitalsUpdateFrequency: TelemetryVitalsUpdateFrequency
@@ -44,12 +46,14 @@ public struct DatadogConfig: Sendable {
         telemetrySampleRate: Float = 100.0,
         trackBackgroundEvents: Bool = true,
         trackWatchdogTerminations: Bool = true,
+        trackAnonymousUser: Bool = true,
+        trackMemoryWarnings: Bool = true,
         longTaskThreshold: TimeInterval? = 0.25,
         appHangThreshold: TimeInterval? = 2.0,
         vitalsUpdateFrequency: TelemetryVitalsUpdateFrequency = .frequent,
         trackingConsent: Consent = .granted,
         logsSampleRate: Float = 100.0,
-        logsRemoteThreshold: TelemetryLogLevel = .info
+        logsRemoteThreshold: TelemetryLogLevel = .debug
     ) {
         self.clientToken = clientToken
         self.applicationID = applicationID
@@ -60,6 +64,8 @@ public struct DatadogConfig: Sendable {
         self.telemetrySampleRate = telemetrySampleRate
         self.trackBackgroundEvents = trackBackgroundEvents
         self.trackWatchdogTerminations = trackWatchdogTerminations
+        self.trackAnonymousUser = trackAnonymousUser
+        self.trackMemoryWarnings = trackMemoryWarnings
         self.longTaskThreshold = longTaskThreshold
         self.appHangThreshold = appHangThreshold
         self.vitalsUpdateFrequency = vitalsUpdateFrequency

@@ -36,7 +36,7 @@ final class RoutePlanner {
         let request = MKDirections.Request()
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: source))
         request.destination = destination
-        request.requestsAlternateRoutes = false
+        request.requestsAlternateRoutes = true
 
         switch mode {
         case .walking:
@@ -47,10 +47,29 @@ final class RoutePlanner {
             request.transportType = .cycling
         }
 
-        let response = try await MKDirections(request: request).calculate()
-        guard let route = response.routes.first else {
-            throw RoutePlannerError.noRoute
+        let directions = MKDirections(request: request)
+        if mode == .transit {
+            // MapKit exposes public-transit timing through calculateETA, but
+            // does not provide the complete Apple Maps transit itinerary to
+            // embedded apps. Never misrepresent an ETA as turn-by-turn steps.
+            let eta = try await directions.calculateETA()
+            return NavigationRoutePlan(
+                mode: mode,
+                destination: destination,
+                destinationName: destinationName,
+                route: nil,
+                estimatedDistanceMeters: eta.distance,
+                estimatedDurationSeconds: eta.expectedTravelTime
+            )
         }
+
+        let response = try await directions.calculate()
+        guard let route = response.routes.min(by: {
+            if $0.expectedTravelTime == $1.expectedTravelTime {
+                return $0.distance < $1.distance
+            }
+            return $0.expectedTravelTime < $1.expectedTravelTime
+        }) else { throw RoutePlannerError.noRoute }
 
         return NavigationRoutePlan(
             mode: mode,

@@ -4,6 +4,8 @@ import EvenG1Core
 @main
 struct EvenG1App: App {
     @StateObject private var bluetoothManager = G1BluetoothManager()
+    @StateObject private var voiceCoordinator = GlassesVoiceCoordinator()
+    @StateObject private var appActionRouter = AppActionRouter()
 
     /// Owned here rather than in a tab because the notification delegate can hand
     /// off a notification before any view has appeared.
@@ -28,6 +30,8 @@ struct EvenG1App: App {
                 .environmentObject(bluetoothManager.diagnostics)
                 .environmentObject(bluetoothManager.glassesEvents)
                 .environmentObject(notificationMirror)
+                .environmentObject(voiceCoordinator)
+                .environmentObject(appActionRouter)
                 .preferredColorScheme(.dark)
                 .task {
                     notificationDelegate.register(viewModel: notificationMirror)

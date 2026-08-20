@@ -47,6 +47,10 @@ final class NavigationViewModel: ObservableObject {
     @Published private(set) var isFollowingUser: Bool = true
     @Published private(set) var favoriteActionMessage: String?
 
+    var canStartTurnByTurn: Bool {
+        currentPlan?.route != nil
+    }
+
     private let searchService: MapSearchService
     private let routePlanner: RoutePlanner
     private let routeTracker: RouteTracker
@@ -284,6 +288,11 @@ final class NavigationViewModel: ObservableObject {
             await previewRoute(to: mapItem)
         } catch {
             state = .error("Could not resolve location")
+            DatadogTelemetryService.shared.capture(
+                error: error,
+                message: "Navigation search result could not be resolved",
+                attributes: ["component": "navigation", "operation": "resolve_search_result"]
+            )
         }
     }
 
@@ -293,7 +302,24 @@ final class NavigationViewModel: ObservableObject {
         }
     }
 
+    func previewFavorite(named name: String) async {
+        guard let favorite = favorite(named: name) else { return }
+        await previewFavorite(favorite)
+    }
+
+    func startNavigationToFavorite(named name: String) async {
+        guard let favorite = favorite(named: name) else { return }
+        guard let item = favorite.toMapItem() else {
+            state = .error("\(favorite.title) does not have a saved location.")
+            return
+        }
+        await previewRoute(to: item)
+        guard state == .routePreview, canStartTurnByTurn else { return }
+        await startNavigation()
+    }
+
     func previewRoute(to destination: MKMapItem) async {
+        let startedAt = Date()
         do {
             stopFollowingUser()
             state = .searching
@@ -329,12 +355,30 @@ final class NavigationViewModel: ObservableObject {
                 )
                 setCameraPosition(.region(region))
             }
-
             DatadogTelemetryService.shared.trackTiming(name: "route_preview_ready")
+            DatadogTelemetryService.shared.trackProductEvent(
+                name: "navigation_route_previewed",
+                attributes: [
+                    "navigation.mode": selectedMode.displayName.lowercased(),
+                    "route.distance_meters": Int(plan.estimatedDistanceMeters),
+                    "route.duration_seconds": Int(plan.estimatedDurationSeconds),
+                    "operation.duration_ms": Int(Date().timeIntervalSince(startedAt) * 1_000)
+                ]
+            )
         } catch {
             state = .error(userFacingError(error))
             activeInstructionTitle = "Route unavailable"
             activeInstructionSubtitle = userFacingError(error)
+            DatadogTelemetryService.shared.capture(
+                error: error,
+                message: "Navigation route preview failed",
+                attributes: [
+                    "component": "navigation",
+                    "operation": "preview_route",
+                    "navigation.mode": selectedMode.displayName.lowercased(),
+                    "operation.duration_ms": Int(Date().timeIntervalSince(startedAt) * 1_000)
+                ]
+            )
         }
     }
 
@@ -412,6 +456,14 @@ final class NavigationViewModel: ObservableObject {
         }
 
         startPeriodicStatusPush()
+        DatadogTelemetryService.shared.trackProductEvent(
+            name: "navigation_started",
+            attributes: [
+                "navigation.mode": selectedMode.displayName.lowercased(),
+                "navigation.transport": transportModeLabel.lowercased(),
+                "route.has_turn_by_turn": plan.route != nil
+            ]
+        )
     }
 
     func stopNavigation() async {
@@ -453,6 +505,11 @@ final class NavigationViewModel: ObservableObject {
         hasInitializedIdleCamera = false
         isFollowingUser = true
         await bootstrapMapCamera()
+
+        DatadogTelemetryService.shared.trackProductEvent(
+            name: "navigation_stopped",
+            attributes: ["navigation.mode": selectedMode.displayName.lowercased()]
+        )
     }
 
     func saveFavorite(kind: NavigationFavoriteKind) async {
@@ -625,11 +682,17 @@ final class NavigationViewModel: ObservableObject {
                 remainingDistanceMeters: 0,
                 etaEpochSeconds: Int(Date().timeIntervalSince1970)
             )
-            hudInstructionText = arrivedInstruction.fallbackText()
             // The map bitmap only renders while actively navigating, so the
             // arrival confirmation is delivered as text on the glasses.
-            _ = await bluetoothManager?.sendNavigationInstruction(arrivedInstruction)
+            await publishInstruction(arrivedInstruction, forceEvenIfMuted: true)
             transportModeLabel = bluetoothManager?.navigationTransportMode.displayName ?? transportModeLabel
+            DatadogTelemetryService.shared.trackProductEvent(
+                name: "navigation_arrived",
+                attributes: [
+                    "navigation.mode": selectedMode.displayName.lowercased(),
+                    "route.total_steps": max(1, route.steps.count)
+                ]
+            )
             return
         }
 
@@ -687,6 +750,10 @@ final class NavigationViewModel: ObservableObject {
 
         state = .rerouting
         bluetoothManager?.setNavigationSessionState(.rerouting)
+        DatadogTelemetryService.shared.trackProductEvent(
+            name: "navigation_reroute_started",
+            attributes: ["navigation.mode": selectedMode.displayName.lowercased()]
+        )
 
         rerouteTask?.cancel()
         rerouteTask = Task { [weak self] in
@@ -713,6 +780,10 @@ final class NavigationViewModel: ObservableObject {
                     stepChanged: true,
                     forceUpload: true
                 )
+                DatadogTelemetryService.shared.trackProductEvent(
+                    name: "navigation_reroute_succeeded",
+                    attributes: ["navigation.mode": self.selectedMode.displayName.lowercased()]
+                )
             } catch {
                 guard !Task.isCancelled, self.state == .rerouting else { return }
                 // Keep tracking the previous route; a transient directions
@@ -720,6 +791,15 @@ final class NavigationViewModel: ObservableObject {
                 self.state = .navigating
                 self.bluetoothManager?.setNavigationSessionState(.active)
                 self.activeInstructionSubtitle = "Unable to reroute; continuing current route"
+                DatadogTelemetryService.shared.capture(
+                    error: error,
+                    message: "Navigation reroute failed",
+                    attributes: [
+                        "component": "navigation",
+                        "operation": "reroute",
+                        "navigation.mode": self.selectedMode.displayName.lowercased()
+                    ]
+                )
             }
         }
     }
@@ -1281,8 +1361,21 @@ final class NavigationViewModel: ObservableObject {
     private func subtitleForPreview(_ plan: NavigationRoutePlan) -> String {
         let distance = Int(plan.estimatedDistanceMeters)
         let minutes = Int(max(1, plan.estimatedDurationSeconds / 60))
-
+        if plan.mode == .transit, !plan.hasInAppRoute {
+            return "Transit ETA · \(minutes)m · open Transit for NYC arrivals"
+        }
         return "\(plan.mode.displayName) · \(distance)m · \(minutes)m"
+    }
+
+    private func favorite(named name: String) -> NavigationFavorite? {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let favorite = favorites.first(where: {
+            $0.title.localizedCaseInsensitiveCompare(normalized) == .orderedSame
+        }) else {
+            state = .error("No saved destination named \(normalized).")
+            return nil
+        }
+        return favorite
     }
 
     private func userFacingError(_ error: Error) -> String {

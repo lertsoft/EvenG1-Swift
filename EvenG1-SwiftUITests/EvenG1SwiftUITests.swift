@@ -124,7 +124,20 @@ final class EvenG1SwiftUITests: XCTestCase {
         XCTAssertTrue(element(identifier: "apps.disconnectedNotice").waitForExistence(timeout: 5))
         XCTAssertTrue(element(identifier: "apps.transitLink").exists)
         XCTAssertTrue(element(identifier: "apps.notificationsLink").exists)
+        XCTAssertTrue(element(identifier: "apps.translateLink").exists)
         XCTAssertTrue(element(identifier: "apps.notesLink").exists)
+    }
+
+    func testTranslationRequiresConnectedGlasses() throws {
+        guard #available(iOS 18.0, *) else { return }
+
+        tapTab(named: "Heads-Up")
+        element(identifier: "apps.translateLink").tap()
+
+        XCTAssertTrue(app.navigationBars["Translate"].waitForExistence(timeout: 5))
+        let toggle = element(identifier: "translation.toggleButton")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertFalse(toggle.isEnabled)
     }
 
     func testTransitWidgetShowsArrivalControls() throws {

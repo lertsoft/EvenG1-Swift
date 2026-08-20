@@ -80,6 +80,8 @@ public final class DatadogTelemetryService: @unchecked Sendable {
             appHangThreshold: config.appHangThreshold,
             trackWatchdogTerminations: config.trackWatchdogTerminations,
             vitalsUpdateFrequency: config.vitalsUpdateFrequency.sdkValue,
+            trackAnonymousUser: config.trackAnonymousUser,
+            trackMemoryWarnings: config.trackMemoryWarnings,
             telemetrySampleRate: config.telemetrySampleRate
         )
         RUM.enable(with: rumConfig)
@@ -108,6 +110,7 @@ public final class DatadogTelemetryService: @unchecked Sendable {
         }
 
         diagnostics.notice("Successfully initialized Datadog (RUM + Logs + crash/hang reporting).")
+        log(.notice, "Datadog telemetry initialized", attributes: ["component": "telemetry"])
     }
 
     /// Set user identity and attributes for session correlation in RUM and logs.
@@ -136,12 +139,31 @@ public final class DatadogTelemetryService: @unchecked Sendable {
         logger.log(level: level.sdkValue, message: message, error: error, attributes: attributes)
     }
 
+    /// Record a handled error in both Logs and RUM Error Tracking.
+    public func capture(
+        error: Error,
+        message: String,
+        attributes: [String: Encodable] = [:]
+    ) {
+        guard let logger = lock.withLock({ _logger }) else { return }
+        logger.log(level: .error, message: message, error: error, attributes: attributes)
+        RUMMonitor.shared().addError(error: error, source: .source, attributes: attributes)
+    }
+
     // MARK: - RUM
 
     /// Track custom user action or event in RUM.
     public func trackAction(type: TelemetryActionType, name: String, attributes: [String: Encodable] = [:]) {
         guard isInitialized else { return }
         RUMMonitor.shared().addAction(type: type.sdkValue, name: name, attributes: attributes)
+    }
+
+    /// Track a stable product event. Attributes should contain dimensions and
+    /// outcomes, never user-entered text or precise locations.
+    public func trackProductEvent(name: String, attributes: [String: Encodable] = [:]) {
+        var enriched = attributes
+        enriched["event.category"] = "product"
+        trackAction(type: .custom, name: name, attributes: enriched)
     }
 
     /// Report an error to RUM.

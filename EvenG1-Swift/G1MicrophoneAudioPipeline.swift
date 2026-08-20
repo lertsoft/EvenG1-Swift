@@ -33,6 +33,7 @@ final class G1MicrophoneAudioPipeline: ObservableObject {
                 } catch {
                     isPlaybackEnabled = false
                     lastError = "Playback start failed: \(error.localizedDescription)"
+                    captureAudioError(error, operation: "start_playback")
                 }
             } else {
                 stopPlaybackEngine()
@@ -68,6 +69,7 @@ final class G1MicrophoneAudioPipeline: ObservableObject {
                 } catch {
                     isPlaybackEnabled = false
                     lastError = "Playback restart failed: \(error.localizedDescription)"
+                    captureAudioError(error, operation: "restart_playback")
                 }
             }
         }
@@ -146,7 +148,16 @@ final class G1MicrophoneAudioPipeline: ObservableObject {
             playedSampleCount += samples.count
         } catch {
             lastError = "Playback enqueue failed: \(error.localizedDescription)"
+            captureAudioError(error, operation: "enqueue_samples")
         }
+    }
+
+    private func captureAudioError(_ error: Error, operation: String) {
+        DatadogTelemetryService.shared.capture(
+            error: error,
+            message: "Microphone audio pipeline failed",
+            attributes: ["component": "microphone", "operation": operation]
+        )
     }
 
     private func startPlaybackEngine() throws {

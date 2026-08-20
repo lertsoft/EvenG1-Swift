@@ -1,6 +1,7 @@
 import Foundation
 import MapKit
 import Combine
+import EvenG1Core
 
 struct MapSearchSuggestion: Identifiable {
     let id = UUID()
@@ -125,6 +126,11 @@ final class MapSearchService: NSObject, ObservableObject, @preconcurrency MKLoca
     func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
         suggestions = []
         isSearching = false
+        DatadogTelemetryService.shared.capture(
+            error: error,
+            message: "Navigation search suggestions failed",
+            attributes: ["component": "navigation", "operation": "search_suggestions"]
+        )
     }
 }
 

@@ -6,6 +6,7 @@ import EvenG1Core
 struct NavigateTab: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
     @EnvironmentObject private var glassesEvents: G1GlassesEventNotifier
+    @EnvironmentObject private var appActionRouter: AppActionRouter
     @Environment(\.scenePhase) private var scenePhase
 
     let isActive: Bool
@@ -112,6 +113,10 @@ struct NavigateTab: View {
             }
             .onChange(of: viewModel.favoriteActionMessage) { _, message in
                 showFavoriteActionAlert = message != nil
+            }
+            .onChange(of: appActionRouter.favoriteNavigationRevision) { _, _ in
+                guard let name = appActionRouter.favoriteNavigationRequest else { return }
+                Task { await viewModel.startNavigationToFavorite(named: name) }
             }
             .alert("Favorites", isPresented: $showFavoriteActionAlert) {
                 Button("OK") {
@@ -608,10 +613,16 @@ struct NavigateTab: View {
                 Button {
                     Task { await viewModel.startNavigation() }
                 } label: {
-                    Label("Start", systemImage: "arrow.triangle.turn.up.right.circle.fill")
+                    Label(
+                        viewModel.canStartTurnByTurn ? "Start" : "ETA only",
+                        systemImage: viewModel.canStartTurnByTurn
+                            ? "arrow.triangle.turn.up.right.circle.fill"
+                            : "tram.fill"
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.cyan)
+                .disabled(!viewModel.canStartTurnByTurn)
 
             case .arrived:
                 Button {

@@ -58,6 +58,11 @@ final class MTAStationPickerViewModel: ObservableObject {
             stations = mapped
         } catch {
             errorMessage = "Could not load station list."
+            DatadogTelemetryService.shared.capture(
+                error: error,
+                message: "Transit station list failed to load",
+                attributes: ["component": "transit", "operation": "load_stations"]
+            )
         }
     }
 
