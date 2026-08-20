@@ -52,7 +52,7 @@ or on the command line in CI:
 | `DATADOG_CLIENT_TOKEN` | yes | RUM client token, not an API key |
 | `DATADOG_APPLICATION_ID` | yes | RUM application ID |
 | `DATADOG_SITE` | no | Site identifier (`us5`) or org domain (`us5.datadoghq.com`); defaults to `us1` |
-| `DATADOG_ENV` | no | Set to `DEV` in Debug and `production` in Release |
+| `DATADOG_ENV` | no | Set to `DEV` in Debug and `prod` in Release |
 | `DATADOG_SERVICE` | no | Defaults to the bundle identifier |
 
 `Info.plist` forwards each setting to the app bundle, and blank or unexpanded
