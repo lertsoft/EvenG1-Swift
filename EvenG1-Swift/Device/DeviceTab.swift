@@ -146,6 +146,7 @@ enum BatteryStyle {
 /// scan when there isn't one. Discovered pairs connect by tapping the row.
 private struct ConnectCard: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
+    @State private var sortedDiscoveredPairs: [(key: String, value: DiscoveredGlassesPair)] = []
 
     var body: some View {
         VStack(spacing: 14) {
@@ -180,8 +181,7 @@ private struct ConnectCard: View {
                     .accessibilityIdentifier("device.connectHint")
             } else {
                 VStack(spacing: 0) {
-                    let pairs = bluetoothManager.discoveredPairs.sorted { $0.key < $1.key }
-                    ForEach(Array(pairs.enumerated()), id: \.element.key) { index, entry in
+                    ForEach(Array(sortedDiscoveredPairs.enumerated()), id: \.element.key) { index, entry in
                         if index > 0 {
                             Divider()
                         }
@@ -195,6 +195,12 @@ private struct ConnectCard: View {
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 20))
+        .onChange(of: bluetoothManager.discoveredPairs.keys.sorted()) { _, _ in
+            sortedDiscoveredPairs = bluetoothManager.discoveredPairs.sorted { $0.key < $1.key }
+        }
+        .onAppear {
+            sortedDiscoveredPairs = bluetoothManager.discoveredPairs.sorted { $0.key < $1.key }
+        }
     }
 
     private var primaryActionTitle: String {
@@ -430,7 +436,10 @@ private struct DeviceLinkRow: View {
 }
 
 #Preview {
+    let bluetoothManager = G1BluetoothManager()
     DeviceTab()
-        .environmentObject(G1BluetoothManager())
+        .environmentObject(bluetoothManager)
+        .environmentObject(bluetoothManager.diagnostics)
+        .environmentObject(bluetoothManager.glassesEvents)
         .environmentObject(DeveloperSettings())
 }

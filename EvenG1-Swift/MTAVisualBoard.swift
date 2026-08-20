@@ -3,20 +3,19 @@ import EvenG1Core
 import Foundation
 import UIKit
 
-enum MTAVisualPageLayout {
+enum MTAVisualPageLayout: Hashable {
     case summaryDual
     case summarySingle
     case list
 }
 
-struct MTAVisualRow: Equatable {
+struct MTAVisualRow: Equatable, Hashable {
     let routeID: String
     let directionLabel: String
     let minutesAway: Int
 }
 
-struct MTAVisualPage: Equatable, Identifiable {
-    let id = UUID()
+struct MTAVisualPage: Equatable, Identifiable, Hashable {
     let title: String
     let subtitle: String
     let layout: MTAVisualPageLayout
@@ -25,6 +24,20 @@ struct MTAVisualPage: Equatable, Identifiable {
     let hintLine: String
     let pageIndex: Int
     let totalPages: Int
+
+    /// Stable identity from page content so SwiftUI can reuse rendered images.
+    var id: String {
+        var hasher = Hasher()
+        hasher.combine(title)
+        hasher.combine(subtitle)
+        hasher.combine(layout)
+        hasher.combine(rows)
+        hasher.combine(alertLine)
+        hasher.combine(hintLine)
+        hasher.combine(pageIndex)
+        hasher.combine(totalPages)
+        return "mta-page-\(hasher.finalize())"
+    }
 }
 
 struct MTAVisualBoardBuilder {
@@ -294,8 +307,14 @@ enum MTABitmapRendererError: Error {
     case bitmapPackFailed
 }
 
-struct MTABitmapRenderer {
-    func render(page: MTAVisualPage) throws -> G1BitmapFrame {
+struct MTABitmapRenderer: Sendable {
+    /// Single rasterization pass producing both the in-app preview image and the glasses bitmap frame.
+    struct RenderedPage: @unchecked Sendable {
+        let image: UIImage
+        let frame: G1BitmapFrame
+    }
+
+    nonisolated func render(page: MTAVisualPage) throws -> RenderedPage {
         let image = renderImage(page: page)
 
         guard let cgImage = image.cgImage else {
@@ -306,16 +325,17 @@ struct MTABitmapRenderer {
             throw MTABitmapRendererError.bitmapPackFailed
         }
 
-        return try G1BitmapFrame(
+        let frame = try G1BitmapFrame(
             width: G1BitmapFrame.defaultWidth,
             height: G1BitmapFrame.defaultHeight,
             bitPackedRows: packed
         )
+        return RenderedPage(image: image, frame: frame)
     }
 
     /// Renders the page at true display resolution. The in-app HUD preview draws
     /// this image directly so it cannot drift from what the glasses receive.
-    func renderImage(page: MTAVisualPage) -> UIImage {
+    nonisolated func renderImage(page: MTAVisualPage) -> UIImage {
         let width = G1BitmapFrame.defaultWidth
         let height = G1BitmapFrame.defaultHeight
         let size = CGSize(width: width, height: height)
@@ -393,12 +413,12 @@ struct MTABitmapRenderer {
         }
     }
 
-    private func rowLineText(_ row: MTAVisualRow) -> String {
+    nonisolated private func rowLineText(_ row: MTAVisualRow) -> String {
         let route = row.routeID.padding(toLength: 2, withPad: " ", startingAt: 0)
         return "\(route) \(truncated(row.directionLabel, maxLength: 19)) \(row.minutesAway)m"
     }
 
-    private func truncated(_ value: String, maxLength: Int) -> String {
+    nonisolated private func truncated(_ value: String, maxLength: Int) -> String {
         if value.count <= maxLength {
             return value
         }
@@ -408,45 +428,7 @@ struct MTABitmapRenderer {
         return String(value.prefix(maxLength - 3)) + "..."
     }
 
-    private static func packMonochromeBits(from image: CGImage) -> Data? {
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else {
-            return nil
-        }
-
-        var grayscale = [UInt8](repeating: 0, count: width * height)
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        guard let context = CGContext(
-            data: &grayscale,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else {
-            return nil
-        }
-
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        let packedBytesPerRow = (width + 7) / 8
-        var packed = [UInt8](repeating: 0, count: packedBytesPerRow * height)
-        let threshold: UInt8 = 96
-
-        for y in 0..<height {
-            for x in 0..<width {
-                let pixel = grayscale[y * width + x]
-                guard pixel >= threshold else {
-                    continue
-                }
-                let byteOffset = y * packedBytesPerRow + (x / 8)
-                let bitMask = UInt8(0x80 >> (x % 8))
-                packed[byteOffset] |= bitMask
-            }
-        }
-
-        return Data(packed)
+    nonisolated private static func packMonochromeBits(from image: CGImage) -> Data? {
+        G1MonochromeBitmapPacker.packBits(from: image)
     }
 }

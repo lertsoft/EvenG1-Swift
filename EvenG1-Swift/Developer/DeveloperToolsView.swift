@@ -6,6 +6,7 @@ import EvenG1Core
 /// navigation transport trace.
 struct DeveloperToolsView: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
+    @EnvironmentObject private var diagnostics: G1DiagnosticsStore
 
     var body: some View {
         List {
@@ -52,8 +53,8 @@ struct DeveloperToolsView: View {
             }
 
             Section {
-                LabeledContent("Buffered logs", value: "\(bluetoothManager.logs.count)")
-                LabeledContent("Buffered events", value: "\(bluetoothManager.events.count)")
+                LabeledContent("Buffered logs", value: "\(diagnostics.logs.count)")
+                LabeledContent("Buffered events", value: "\(diagnostics.events.count)")
                 LabeledContent("Trace records", value: "\(bluetoothManager.navigationTraceEntries.count)")
 
                 Button(role: .destructive) {
@@ -62,8 +63,8 @@ struct DeveloperToolsView: View {
                     Label("Clear all buffers", systemImage: "trash")
                 }
                 .disabled(
-                    bluetoothManager.logs.isEmpty &&
-                    bluetoothManager.events.isEmpty &&
+                    diagnostics.logs.isEmpty &&
+                    diagnostics.events.isEmpty &&
                     bluetoothManager.navigationTraceEntries.isEmpty
                 )
             } header: {

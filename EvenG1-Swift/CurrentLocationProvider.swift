@@ -3,6 +3,7 @@ import Foundation
 
 @MainActor
 protocol LocationProviding {
+    var authorizationStatus: CLAuthorizationStatus { get }
     func requestOneShotLocation() async throws -> CLLocationCoordinate2D
 }
 
@@ -26,6 +27,10 @@ final class CurrentLocationProvider: NSObject, LocationProviding, CLLocationMana
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     }
 
+    var authorizationStatus: CLAuthorizationStatus {
+        manager.authorizationStatus
+    }
+
     func requestOneShotLocation() async throws -> CLLocationCoordinate2D {
         guard continuation == nil else {
             throw CurrentLocationError.underlying("Another location request is already in progress.")
@@ -42,6 +47,7 @@ final class CurrentLocationProvider: NSObject, LocationProviding, CLLocationMana
                 case .authorizedAlways, .authorizedWhenInUse:
                     self.startLocationRequest()
                 case .notDetermined:
+                    self.scheduleTimeout()
                     self.manager.requestWhenInUseAuthorization()
                 @unknown default:
                     self.resolve(.failure(CurrentLocationError.deniedOrRestricted))
@@ -55,9 +61,12 @@ final class CurrentLocationProvider: NSObject, LocationProviding, CLLocationMana
     }
 
     private func startLocationRequest() {
-        timeoutTask?.cancel()
         manager.requestLocation()
+        scheduleTimeout()
+    }
 
+    private func scheduleTimeout() {
+        timeoutTask?.cancel()
         timeoutTask = Task { [weak self] in
             do {
                 try await Task.sleep(for: .seconds(15))

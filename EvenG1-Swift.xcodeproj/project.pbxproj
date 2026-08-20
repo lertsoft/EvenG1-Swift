@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		1A9DBCFA2F34000100D2751C /* EvenG1Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1A9DBCFB2F34000100D2751C /* EvenG1Core */; };
 		1A9DBD0B2F35000100D2751C /* EvenG1SwiftUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A9DBD132F35000100D2751C /* EvenG1SwiftUITests.swift */; };
+		1A9DBD202F36000100D2751C /* EvenG1Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1A9DBCFB2F34000100D2751C /* EvenG1Core */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -25,6 +26,8 @@
 		1A9DBCCC2F33FE9D00D2751C /* EvenG1-Swift.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "EvenG1-Swift.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A9DBD0A2F35000100D2751C /* EvenG1-SwiftUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "EvenG1-SwiftUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A9DBD132F35000100D2751C /* EvenG1SwiftUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvenG1SwiftUITests.swift; sourceTree = "<group>"; };
+		1A9DBD172F36000100D2751C /* EvenG1CoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EvenG1CoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A9DBD222F36000100D2751C /* Verification.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = Verification.xctestplan; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -46,6 +49,11 @@
 			path = "EvenG1-Swift";
 			sourceTree = "<group>";
 		};
+		1A9DBD1F2F36000100D2751C /* Tests/EvenG1CoreTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests/EvenG1CoreTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +72,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		1A9DBD1A2F36000100D2751C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A9DBD202F36000100D2751C /* EvenG1Core in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -71,7 +87,9 @@
 			isa = PBXGroup;
 			children = (
 				1A9DBCCE2F33FE9D00D2751C /* EvenG1-Swift */,
+				1A9DBD1F2F36000100D2751C /* Tests/EvenG1CoreTests */,
 				1A9DBD0C2F35000100D2751C /* EvenG1-SwiftUITests */,
+				1A9DBD212F36000100D2751C /* xctestplans */,
 				1A9DBCCD2F33FE9D00D2751C /* Products */,
 			);
 			sourceTree = "<group>";
@@ -80,6 +98,7 @@
 			isa = PBXGroup;
 			children = (
 				1A9DBCCC2F33FE9D00D2751C /* EvenG1-Swift.app */,
+				1A9DBD172F36000100D2751C /* EvenG1CoreTests.xctest */,
 				1A9DBD0A2F35000100D2751C /* EvenG1-SwiftUITests.xctest */,
 			);
 			name = Products;
@@ -91,6 +110,14 @@
 				1A9DBD132F35000100D2751C /* EvenG1SwiftUITests.swift */,
 			);
 			path = "EvenG1-SwiftUITests";
+			sourceTree = "<group>";
+		};
+		1A9DBD212F36000100D2751C /* xctestplans */ = {
+			isa = PBXGroup;
+			children = (
+				1A9DBD222F36000100D2751C /* Verification.xctestplan */,
+			);
+			path = xctestplans;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -137,6 +164,29 @@
 			productReference = 1A9DBD0A2F35000100D2751C /* EvenG1-SwiftUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		1A9DBD182F36000100D2751C /* EvenG1CoreTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A9DBD1C2F36000100D2751C /* Build configuration list for PBXNativeTarget "EvenG1CoreTests" */;
+			buildPhases = (
+				1A9DBD192F36000100D2751C /* Sources */,
+				1A9DBD1A2F36000100D2751C /* Frameworks */,
+				1A9DBD1B2F36000100D2751C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				1A9DBD1F2F36000100D2751C /* Tests/EvenG1CoreTests */,
+			);
+			name = EvenG1CoreTests;
+			packageProductDependencies = (
+				1A9DBCFB2F34000100D2751C /* EvenG1Core */,
+			);
+			productName = EvenG1CoreTests;
+			productReference = 1A9DBD172F36000100D2751C /* EvenG1CoreTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -153,6 +203,9 @@
 					1A9DBD0D2F35000100D2751C = {
 						CreatedOnToolsVersion = 26.2;
 						TestTargetID = 1A9DBCCB2F33FE9D00D2751C;
+					};
+					1A9DBD182F36000100D2751C = {
+						CreatedOnToolsVersion = 26.2;
 					};
 				};
 			};
@@ -174,6 +227,7 @@
 			projectRoot = "";
 			targets = (
 				1A9DBCCB2F33FE9D00D2751C /* EvenG1-Swift */,
+				1A9DBD182F36000100D2751C /* EvenG1CoreTests */,
 				1A9DBD0D2F35000100D2751C /* EvenG1-SwiftUITests */,
 			);
 		};
@@ -188,6 +242,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		1A9DBD102F35000100D2751C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A9DBD1B2F36000100D2751C /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -209,6 +270,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A9DBD0B2F35000100D2751C /* EvenG1SwiftUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A9DBD192F36000100D2751C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -276,7 +344,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
@@ -336,7 +404,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
@@ -352,24 +420,15 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				AUTOMATION_APPLE_EVENTS = NO;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DATADOG_APPLICATION_ID = "bd30acd2-749b-46a8-b26c-ccae769ffd4e";
 				DATADOG_CLIENT_TOKEN = pub0872c829ab359e8203034ad2e2136275;
 				DATADOG_ENV = DEV;
 				DATADOG_SERVICE = "";
 				DATADOG_SITE = us1;
 				DEVELOPMENT_TEAM = FD3Q7XVPA4;
-				ENABLE_APP_SANDBOX = YES;
-				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
-				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
-				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
-				ENABLE_RESOURCE_ACCESS_LOCATION = YES;
-				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
-				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "EvenG1-Swift/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "EvenG1 Swift";
@@ -386,18 +445,12 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.kosukobo.EvenG1-Swift";
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
-				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
-				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
-				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
-				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
-				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -417,24 +470,15 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				AUTOMATION_APPLE_EVENTS = NO;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DATADOG_APPLICATION_ID = "bd30acd2-749b-46a8-b26c-ccae769ffd4e";
 				DATADOG_CLIENT_TOKEN = pub0872c829ab359e8203034ad2e2136275;
 				DATADOG_ENV = production;
 				DATADOG_SERVICE = "";
 				DATADOG_SITE = us1;
 				DEVELOPMENT_TEAM = FD3Q7XVPA4;
-				ENABLE_APP_SANDBOX = YES;
-				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
-				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
-				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
-				ENABLE_RESOURCE_ACCESS_LOCATION = YES;
-				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
-				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "EvenG1-Swift/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "EvenG1 Swift";
@@ -451,18 +495,12 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.kosukobo.EvenG1-Swift";
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
-				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
-				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
-				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
-				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
-				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -481,10 +519,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = FD3Q7XVPA4;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.kosukobo.EvenG1-SwiftUITests";
@@ -503,10 +541,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = FD3Q7XVPA4;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.kosukobo.EvenG1-SwiftUITests";
@@ -518,6 +556,48 @@
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = "EvenG1-Swift";
+			};
+			name = Release;
+		};
+		1A9DBD1D2F36000100D2751C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = FD3Q7XVPA4;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kosukobo.EvenG1CoreTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1A9DBD1E2F36000100D2751C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = FD3Q7XVPA4;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kosukobo.EvenG1CoreTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -547,6 +627,15 @@
 			buildConfigurations = (
 				1A9DBD152F35000100D2751C /* Debug */,
 				1A9DBD162F35000100D2751C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A9DBD1C2F36000100D2751C /* Build configuration list for PBXNativeTarget "EvenG1CoreTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A9DBD1D2F36000100D2751C /* Debug */,
+				1A9DBD1E2F36000100D2751C /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -98,17 +98,20 @@ final class EvenG1SwiftUITests: XCTestCase {
 
     // MARK: - Navigate tab
 
-    func testNavigateTabOffersHUDPreviewInsteadOfDiagnostics() throws {
+    func testNavigateTabLocateButtonIsVisibleWhenIdle() throws {
         tapTab(named: "Navigate")
 
-        let previewButton = app.buttons["navigation.hudPreviewButton"]
-        XCTAssertTrue(previewButton.waitForExistence(timeout: 5))
+        let locateButton = app.buttons["navigation.locateUserButton"]
+        XCTAssertTrue(locateButton.waitForExistence(timeout: 5))
+    }
+
+    func testNavigateTabHidesTripControlsWhenIdle() throws {
+        tapTab(named: "Navigate")
+
+        XCTAssertTrue(app.buttons["navigation.locateUserButton"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["navigation.addFavoriteButton"].exists)
+        XCTAssertFalse(app.buttons["navigation.hudPreviewButton"].exists)
         XCTAssertFalse(element(identifier: "navigation.hudPreviewPanel").exists)
-
-        previewButton.tap()
-        XCTAssertTrue(element(identifier: "navigation.hudPreviewPanel").waitForExistence(timeout: 5))
-
-        // No trip is running, so the destructive cancel affordance stays hidden.
         XCTAssertFalse(app.buttons["navigation.endTripButton"].exists)
     }
 
@@ -171,6 +174,53 @@ final class EvenG1SwiftUITests: XCTestCase {
         XCTAssertEqual(element(identifier: "notifications.status").label, "Not sent")
     }
 
+    func testNotificationMirrorIsOffUntilEnabled() throws {
+        tapTab(named: "Heads-Up")
+        element(identifier: "apps.notificationsLink").tap()
+
+        XCTAssertTrue(app.navigationBars["Notifications"].waitForExistence(timeout: 5))
+
+        let mirrorToggle = element(identifier: "notifications.mirrorToggle")
+        scrollToElement(mirrorToggle, maximumSwipes: 8)
+        XCTAssertTrue(mirrorToggle.exists)
+
+        // Simulating is pointless while the mirror is off, so the control stays
+        // disabled until the feature is on.
+        let simulateButton = element(identifier: "notifications.simulateButton")
+        scrollToElement(simulateButton, maximumSwipes: 8)
+        XCTAssertTrue(simulateButton.exists)
+        XCTAssertFalse(simulateButton.isEnabled)
+    }
+
+    func testNotificationMirrorEnablingRevealsSimulateAction() throws {
+        tapTab(named: "Heads-Up")
+        element(identifier: "apps.notificationsLink").tap()
+
+        XCTAssertTrue(app.navigationBars["Notifications"].waitForExistence(timeout: 5))
+
+        let mirrorToggle = element(identifier: "notifications.mirrorToggle")
+        scrollToElement(mirrorToggle, maximumSwipes: 8)
+        setSwitch(mirrorToggle, on: true)
+
+        let simulateButton = element(identifier: "notifications.simulateButton")
+        scrollToElement(simulateButton, maximumSwipes: 8)
+        XCTAssertTrue(simulateButton.isEnabled)
+
+        // Queue one notification. Without glasses attached the mirror still tracks
+        // it, so the dismiss action appears and the status invites the tilt.
+        simulateButton.tap()
+
+        let dismissButton = element(identifier: "notifications.dismissButton")
+        XCTAssertTrue(dismissButton.waitForExistence(timeout: 5))
+
+        let status = element(identifier: "notifications.mirrorStatus")
+        scrollBackToElement(status, maximumSwipes: 8)
+        XCTAssertTrue(
+            status.label.contains("Tilt your head up"),
+            "Unexpected mirror status: \(status.label)"
+        )
+    }
+
     // MARK: - Helpers
 
     private func tapTab(named name: String) {
@@ -204,6 +254,16 @@ final class EvenG1SwiftUITests: XCTestCase {
         var remainingSwipes = maximumSwipes
         while (!element.exists || !element.isHittable), remainingSwipes > 0 {
             app.swipeUp()
+            remainingSwipes -= 1
+        }
+    }
+
+    /// Counterpart to `scrollToElement` for rows that sit above the current
+    /// scroll position.
+    private func scrollBackToElement(_ element: XCUIElement, maximumSwipes: Int = 6) {
+        var remainingSwipes = maximumSwipes
+        while (!element.exists || !element.isHittable), remainingSwipes > 0 {
+            app.swipeDown()
             remainingSwipes -= 1
         }
     }

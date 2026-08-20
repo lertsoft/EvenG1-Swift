@@ -20,6 +20,8 @@ final class MapSearchService: NSObject, ObservableObject, @preconcurrency MKLoca
 
     private let completer: MKLocalSearchCompleter
     private var debounceTask: Task<Void, Never>?
+    private var searchRegion: MKCoordinateRegion?
+    private var lastQueryFragment: String?
 
     override init() {
         let completer = MKLocalSearchCompleter()
@@ -29,8 +31,23 @@ final class MapSearchService: NSObject, ObservableObject, @preconcurrency MKLoca
         self.completer.delegate = self
     }
 
+    func updateRegion(center: CLLocationCoordinate2D) {
+        let region = MKCoordinateRegion(
+            center: center,
+            latitudinalMeters: 25_000,
+            longitudinalMeters: 25_000
+        )
+        searchRegion = region
+        completer.region = region
+
+        if let lastQueryFragment, lastQueryFragment.count >= 2 {
+            completer.queryFragment = lastQueryFragment
+        }
+    }
+
     func updateQuery(_ query: String) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastQueryFragment = trimmed.isEmpty ? nil : trimmed
 
         debounceTask?.cancel()
         if trimmed.count < 2 {
@@ -53,12 +70,16 @@ final class MapSearchService: NSObject, ObservableObject, @preconcurrency MKLoca
 
     func clear() {
         debounceTask?.cancel()
+        lastQueryFragment = nil
         suggestions = []
         isSearching = false
     }
 
     func resolve(_ suggestion: MapSearchSuggestion) async throws -> MKMapItem {
         let request = MKLocalSearch.Request(completion: suggestion.completion)
+        if let searchRegion {
+            request.region = searchRegion
+        }
         let response = try await MKLocalSearch(request: request).start()
 
         if let first = response.mapItems.first {
@@ -69,6 +90,27 @@ final class MapSearchService: NSObject, ObservableObject, @preconcurrency MKLoca
         let fallback = MKMapItem(placemark: fallbackPlacemark)
         fallback.name = suggestion.title
         return fallback
+    }
+
+    func resolveNaturalLanguageQuery(_ query: String) async throws -> MKMapItem {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw MapSearchError.emptyQuery
+        }
+
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = trimmed
+        request.resultTypes = [.address, .pointOfInterest]
+        if let searchRegion {
+            request.region = searchRegion
+        }
+
+        let response = try await MKLocalSearch(request: request).start()
+        if let first = response.mapItems.first {
+            return first
+        }
+
+        throw MapSearchError.noResults
     }
 
     // MARK: - MKLocalSearchCompleterDelegate
@@ -84,4 +126,9 @@ final class MapSearchService: NSObject, ObservableObject, @preconcurrency MKLoca
         suggestions = []
         isSearching = false
     }
+}
+
+enum MapSearchError: Error {
+    case emptyQuery
+    case noResults
 }

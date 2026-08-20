@@ -1,0 +1,37 @@
+{
+  "configurations" : [
+    {
+      "id" : "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+      "name" : "Default",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:EvenG1-Swift.xcodeproj",
+      "identifier" : "1A9DBCCB2F33FE9D00D2751C",
+      "name" : "EvenG1-Swift"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:EvenG1-Swift.xcodeproj",
+        "identifier" : "1A9DBD0D2F35000100D2751C",
+        "name" : "EvenG1-SwiftUITests"
+      }
+    },
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:EvenG1-Swift.xcodeproj",
+        "identifier" : "1A9DBD182F36000100D2751C",
+        "name" : "EvenG1CoreTests"
+      }
+    }
+  ],
+  "version" : 1
+}

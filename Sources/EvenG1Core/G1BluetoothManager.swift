@@ -6,6 +6,30 @@ import os.log
 /// Logger for G1 Bluetooth operations
 private let logger = Logger(subsystem: "com.eveng1", category: "Bluetooth")
 
+// #region agent log
+nonisolated private func agentLog(_ hypothesisId: String, _ message: String, _ data: [String: Any]) {
+    let payload: [String: Any] = [
+        "sessionId": "bf2a66", "runId": "frames", "hypothesisId": hypothesisId,
+        "location": "G1BluetoothManager.swift", "message": message, "data": data,
+        "timestamp": Int(Date().timeIntervalSince1970 * 1000)
+    ]
+    guard let json = try? JSONSerialization.data(withJSONObject: payload),
+          let url = FileManager.default
+            .urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("debug-bf2a66.log") else { return }
+    print("AGENTLOG-bf2a66 \(String(decoding: json, as: UTF8.self))")
+    var line = json
+    line.append(0x0A)
+    if let handle = try? FileHandle(forWritingTo: url) {
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: line)
+    } else {
+        try? line.write(to: url)
+    }
+}
+// #endregion
+
 /// FIFO async gate used on the main actor to prevent command-state races across
 /// suspension points. A resumed waiter owns the gate until it releases it.
 @MainActor
@@ -66,19 +90,12 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     
     /// Currently connected glasses (nil if not connected)
     @Published public private(set) var connectedGlasses: ConnectedGlassesPair?
-    
-    /// Log entries for debugging
-    @Published public private(set) var logs: [LogEntry] = []
-    
-    /// Parsed events from glasses
-    @Published public private(set) var events: [G1Event] = []
 
-    /// Monotonic revision that changes for every parsed event, including after
-    /// the bounded `events` history reaches its capacity.
-    @Published public private(set) var eventRevision: UInt64 = 0
-    
-    /// Latest frames (for raw data view)
-    @Published public private(set) var recentFrames: [G1Frame] = []
+    /// High-frequency diagnostics buffers, isolated from consumer-tab observation.
+    public let diagnostics = G1DiagnosticsStore()
+
+    /// Lightweight revision counter for glasses gesture routing.
+    public let glassesEvents = G1GlassesEventNotifier()
     
     /// Is currently scanning
     @Published public private(set) var isScanning: Bool = false
@@ -88,6 +105,11 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
     /// Whether the glasses dashboard is currently shown (tracked app-side).
     @Published public private(set) var isDashboardVisible: Bool = false
+
+    /// Whether an app feature is currently drawing its own content on the single
+    /// display surface. While claimed, head gestures must not toggle the stock
+    /// dashboard, which would otherwise cover that content.
+    @Published public private(set) var isCustomDisplaySurfaceClaimed: Bool = false
 
     /// Last display-position setting acknowledged by both arms.
     @Published public private(set) var displayPositionSettings: G1DisplayPositionSettings?
@@ -267,6 +289,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
     /// Native-first navigation delivery controller.
     private var navigationTransport = G1NavigationTransport()
+
+    /// Suppresses heartbeat traffic while a display transaction is in flight.
+    private var displayTransactionDepth = 0
 
     /// Last known progress context for trace enrichment.
     private var lastNavigationProgress: G1NavigationProgress?
@@ -454,6 +479,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         connectedGlasses = nil
         connectionState = .disconnected
         isDashboardVisible = false
+        isCustomDisplaySurfaceClaimed = false
         displayPositionSettings = nil
         activeMicrophoneSide = nil
         microphoneState = .idle
@@ -686,56 +712,69 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
     /// Send text using a structured request
     public func sendText(_ request: G1TextSendRequest) {
+        Task {
+            _ = await sendTextAwaitingCompletion(request)
+        }
+    }
+
+    /// Send text and return only after the display command gate has serialized the
+    /// upload. Callers that follow a text write with another display command need
+    /// this ordering guarantee; the fire-and-forget `sendText` cannot provide it
+    /// because a later command can win the gate first.
+    @discardableResult
+    public func sendTextAwaitingCompletion(_ request: G1TextSendRequest) async -> Bool {
         let builder = G1TextPacketBuilder(textHelper: textHelper)
         let packets = builder.buildPackets(for: request)
 
         if packets.isEmpty {
             log("No text packets to send", level: .warning)
-            return
+            return false
         }
 
-        Task {
-            guard await displayCommandGate.acquire(), !Task.isCancelled else { return }
-            defer { displayCommandGate.release() }
+        guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { displayCommandGate.release() }
 
-            guard connectionState == .fullyConnected else {
-                log("Cannot send text: Not fully connected", level: .warning)
-                return
+        guard connectionState == .fullyConnected else {
+            log("Cannot send text: Not fully connected", level: .warning)
+            return false
+        }
+
+        _ = await ensureCustomDisplaySurfaceVisible()
+
+        let preview = request.text.prefix(30)
+        let suffix = request.text.count > 30 ? "..." : ""
+        log("Sending \(request.mode.displayName) text: \"\(preview)\(suffix)\" (packets: \(packets.count), ack: \(request.awaitAck))", level: .info)
+
+        for (index, packet) in packets.enumerated() {
+            guard !Task.isCancelled else {
+                log("Text send cancelled", level: .debug)
+                return false
             }
 
-            let preview = request.text.prefix(30)
-            let suffix = request.text.count > 30 ? "..." : ""
-            log("Sending \(request.mode.displayName) text: \"\(preview)\(suffix)\" (packets: \(packets.count), ack: \(request.awaitAck))", level: .info)
+            if request.awaitAck {
+                let acked = await sendCommandAwaitAck(packet.data, sequence: nil)
+                if !acked {
+                    log("Text send stopped after missing ACK (packet \(index + 1)/\(packets.count))", level: .warning)
+                    return false
+                }
+            } else {
+                guard sendCommand(packet.data) else {
+                    log("Text send stopped because packet \(index + 1)/\(packets.count) could not be queued", level: .warning)
+                    return false
+                }
+            }
 
-            for (index, packet) in packets.enumerated() {
-                guard !Task.isCancelled else {
+            if index < packets.count - 1 {
+                do {
+                    try await Task.sleep(for: .milliseconds(Int64(clamping: request.interPacketDelayMs)))
+                } catch {
                     log("Text send cancelled", level: .debug)
-                    return
-                }
-
-                if request.awaitAck {
-                    let acked = await sendCommandAwaitAck(packet.data, sequence: nil)
-                    if !acked {
-                        log("Text send stopped after missing ACK (packet \(index + 1)/\(packets.count))", level: .warning)
-                        break
-                    }
-                } else {
-                    guard sendCommand(packet.data) else {
-                        log("Text send stopped because packet \(index + 1)/\(packets.count) could not be queued", level: .warning)
-                        return
-                    }
-                }
-
-                if index < packets.count - 1 {
-                    do {
-                        try await Task.sleep(for: .milliseconds(Int64(clamping: request.interPacketDelayMs)))
-                    } catch {
-                        log("Text send cancelled", level: .debug)
-                        return
-                    }
+                    return false
                 }
             }
         }
+
+        return true
     }
 
     /// Send a full bitmap frame using BMP upload commands, then finalize with end + CRC.
@@ -746,10 +785,15 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
         defer { displayCommandGate.release() }
 
+        beginDisplayTransaction()
+        defer { endDisplayTransaction() }
+
         guard connectionState == .fullyConnected else {
             log("Cannot send bitmap: Not fully connected", level: .warning)
             return false
         }
+
+        _ = await ensureCustomDisplaySurfaceVisible()
 
         let builder = G1BitmapPacketBuilder()
         let envelope: G1BitmapPacketEnvelope
@@ -788,24 +832,44 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             }
         }
 
-        let endAcked = await sendCommandAwaitAck(
-            envelope.endPacket,
-            sequence: nil,
-            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
-        )
-        guard endAcked else {
-            log("Bitmap end packet ACK failed", level: .warning)
+        guard await awaitDrainWriteQueues(timeoutMs: 5_000) else {
+            log("Bitmap chunk queues did not drain before finalize", level: .warning)
             return false
         }
 
-        let crcAcked = await sendCommandAwaitAck(
-            envelope.crcPacket,
-            sequence: nil,
-            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
-        )
-        guard crcAcked else {
-            log("Bitmap CRC packet ACK failed", level: .warning)
+        // Core Bluetooth's application queue being empty means writeValue was
+        // called, not that the peripheral has consumed the final chunk.
+        // Preserve a short firmware settle window before finalization.
+        do {
+            try await Task.sleep(for: .milliseconds(100))
+        } catch {
             return false
+        }
+
+        for side in Self.ackSendOrder(for: nil) {
+            let endAcked = await sendCommandAwaitAck(
+                envelope.endPacket,
+                to: side,
+                sequence: nil,
+                timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+            )
+            guard endAcked else {
+                log("Bitmap end packet ACK failed [\(side.rawValue)]", level: .warning)
+                return false
+            }
+        }
+
+        for side in Self.ackSendOrder(for: nil) {
+            let crcAcked = await sendCommandAwaitAck(
+                envelope.crcPacket,
+                to: side,
+                sequence: nil,
+                timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+            )
+            guard crcAcked else {
+                log("Bitmap CRC packet ACK failed [\(side.rawValue)]", level: .warning)
+                return false
+            }
         }
 
         log("Bitmap sent (\(frame.width)x\(frame.height), packets: \(envelope.dataPackets.count))", level: .info)
@@ -815,20 +879,28 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Clear the glasses display
     public func clearDisplay() {
         Task {
-            guard await displayCommandGate.acquire(), !Task.isCancelled else { return }
-            defer { displayCommandGate.release() }
-
-            let exitCommand = Data([G1Command.EXIT_ALL.rawValue])
-            let acked = await sendCommandAwaitAck(
-                exitCommand,
-                timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
-            )
-            if acked {
-                log("Display cleared", level: .info)
-            } else {
-                log("Exit-all command was not acknowledged", level: .warning)
-            }
+            _ = await clearDisplayAwaitingCompletion()
         }
+    }
+
+    /// Clear the glasses display and return only after the display command gate
+    /// has serialized the operation with any in-flight bitmap upload.
+    @discardableResult
+    public func clearDisplayAwaitingCompletion() async -> Bool {
+        guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { displayCommandGate.release() }
+
+        let exitCommand = Data([G1Command.EXIT_ALL.rawValue])
+        let acked = await sendCommandAwaitAck(
+            exitCommand,
+            timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
+        )
+        if acked {
+            log("Display cleared", level: .info)
+        } else {
+            log("Exit-all command was not acknowledged", level: .warning)
+        }
+        return acked
     }
 
     /// Configure the vendor notification whitelist on the left arm.
@@ -861,6 +933,8 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         _ notification: G1Notification,
         retryAttempts: Int = 6
     ) async -> Bool {
+        _ = await ensureCustomDisplaySurfaceVisible()
+
         let transportID = notificationTransportID
         notificationTransportID &+= 1
 
@@ -932,6 +1006,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Configure firmware-assisted dashboard activation via head-up behavior.
     /// Optionally enables app-side fallback on head-up/head-down events.
     public func configureTiltDashboard(_ config: G1TiltDashboardConfig) async -> Bool {
+        guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { displayCommandGate.release() }
+
         tiltDashboardConfig = config
         lastDashboardFallbackActionAt = nil
 
@@ -944,13 +1021,6 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             mode = .off
         }
         let modePayload = Self.headUpModePayload(for: mode)
-        let rightModeAcked = await sendCompatibilityCommand(
-            .headUpMode,
-            payload: modePayload,
-            to: .right,
-            sequence: nil,
-            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
-        )
         let leftModeAcked = await sendCompatibilityCommand(
             .headUpMode,
             payload: modePayload,
@@ -958,16 +1028,23 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             sequence: nil,
             timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
         )
-        let modeAcked = rightModeAcked || leftModeAcked
+        let rightModeAcked = await sendCompatibilityCommand(
+            .headUpMode,
+            payload: modePayload,
+            to: .right,
+            sequence: nil,
+            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+        )
+        let modeAcked = leftModeAcked || rightModeAcked
 
         if !modeAcked {
             log("Tilt dashboard mode command failed", level: .warning)
         } else {
-            if !rightModeAcked {
-                log("Tilt mode update did not ACK on RIGHT", level: .warning)
-            }
             if !leftModeAcked {
                 log("Tilt mode update did not ACK on LEFT", level: .warning)
+            }
+            if !rightModeAcked {
+                log("Tilt mode update did not ACK on RIGHT", level: .warning)
             }
         }
 
@@ -1125,6 +1202,12 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
 
     public func setNavigationSessionState(_ state: G1NavigationSessionState) {
         navigationSessionState = state
+    }
+
+    /// Declare whether an app feature currently owns the custom display surface.
+    public func setCustomDisplaySurfaceClaimed(_ claimed: Bool) {
+        guard isCustomDisplaySurfaceClaimed != claimed else { return }
+        isCustomDisplaySurfaceClaimed = claimed
     }
 
     /// Toggle navigation guidance mute state and return the new value.
@@ -1370,11 +1453,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         G1NavigationTraceExporter.jsonLines(newestFirst: navigationTraceEntries)
     }
     
-    /// Clear logs
+    /// Clear diagnostics buffers and navigation trace.
     public func clearLogs() {
-        logs.removeAll()
-        events.removeAll()
-        recentFrames.removeAll()
+        diagnostics.clearAll()
         navigationTraceEntries.removeAll()
     }
     
@@ -1462,6 +1543,28 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         case headUpMode
         case dashboardVisibility
         case microphoneControl
+    }
+
+    /// Ensures custom text, notification, and bitmap content is not written to
+    /// a firmware-hidden display surface. `0x07 00` persists independently of
+    /// successful payload ACKs, so an upload may succeed while remaining blank.
+    @discardableResult
+    private func ensureCustomDisplaySurfaceVisible() async -> Bool {
+        guard connectionState == .fullyConnected else {
+            return false
+        }
+
+        guard !isDashboardVisible else {
+            return true
+        }
+
+        let visible = await setDashboardVisible(true)
+        if visible {
+            try? await Task.sleep(for: .milliseconds(50))
+        } else {
+            log("Could not enable custom display surface", level: .warning)
+        }
+        return visible
     }
 
     private func sendNotificationPacketTransaction(
@@ -1800,6 +1903,48 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         failQueuedWrites(for: .right)
     }
 
+    private func beginDisplayTransaction() {
+        displayTransactionDepth += 1
+        if displayTransactionDepth == 1 {
+            heartbeatTask?.cancel()
+            heartbeatTask = nil
+            missedHeartbeatAcks = 0
+        }
+    }
+
+    private func endDisplayTransaction() {
+        guard displayTransactionDepth > 0 else { return }
+        displayTransactionDepth -= 1
+        if displayTransactionDepth == 0, connectionState == .fullyConnected {
+            startHeartbeat()
+        }
+    }
+
+    private func awaitDrainWriteQueues(timeoutMs: Int) async -> Bool {
+        let deadline = Date().addingTimeInterval(Double(max(1, timeoutMs)) / 1_000)
+        while Date() < deadline {
+            if Task.isCancelled {
+                return false
+            }
+
+            let leftPending = pendingWrites[.left]?.count ?? 0
+            let rightPending = pendingWrites[.right]?.count ?? 0
+            if leftPending == 0, rightPending == 0 {
+                return true
+            }
+
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        let leftPending = pendingWrites[.left]?.count ?? 0
+        let rightPending = pendingWrites[.right]?.count ?? 0
+        log(
+            "Write queue drain timed out (L: \(leftPending), R: \(rightPending))",
+            level: .warning
+        )
+        return false
+    }
+
     nonisolated static func isValidWriteLength(_ byteCount: Int, maximumWriteLength: Int) -> Bool {
         byteCount > 0 && maximumWriteLength > 0 && byteCount <= maximumWriteLength
     }
@@ -1845,11 +1990,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     private func log(_ message: String, level: LogEntry.LogLevel = .info) {
         let entry = LogEntry(timestamp: Date(), message: message, level: level)
 
-        logs.append(entry)
-        // Keep last 200 logs
-        if logs.count > 200 {
-            logs.removeFirst(logs.count - 200)
-        }
+        diagnostics.appendLog(entry)
         
         // Also log to system
         logger.log("\(level.rawValue) \(message)")
@@ -1863,18 +2004,12 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     }
     
     private func addEvent(_ event: G1Event) {
-        events.insert(event, at: 0)
-        if events.count > 50 {
-            events.removeLast()
-        }
-        eventRevision &+= 1
+        diagnostics.appendEvent(event)
+        glassesEvents.notify(event)
     }
     
     private func addFrame(_ frame: G1Frame) {
-        recentFrames.insert(frame, at: 0)
-        if recentFrames.count > 100 {
-            recentFrames.removeLast()
-        }
+        diagnostics.appendFrame(frame)
     }
     
     // MARK: - Connection State Machine
@@ -2067,6 +2202,28 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         
         // Parse event
         if let event = frameParser.parseEvent(from: frame) {
+            // #region agent log
+            switch event {
+            case .singleTap, .doubleTap, .tripleTap, .swipeForward, .swipeBackward,
+                 .pressAndHold, .pressAndRelease, .headUp, .headDown:
+                agentLog("H28", "gesture event source frame", [
+                    "event": event.displayString,
+                    "side": side.rawValue,
+                    "commandByte": String(format: "%02X", frame.commandByte),
+                    "frameHex": frame.hexString
+                ])
+            case .unknown(let command, _, _) where command == G1Command.STATUS.rawValue
+                || command == G1Command.DEVICE_EVENT.rawValue
+                || command == G1CompatibilityCommand.headUpMode:
+                agentLog("H29", "unmapped control frame", [
+                    "side": side.rawValue,
+                    "commandByte": String(format: "%02X", frame.commandByte),
+                    "frameHex": frame.hexString
+                ])
+            default:
+                break
+            }
+            // #endregion
             addEvent(event)
             log("Event [\(side.rawValue)]: \(event.displayString)", level: .info)
             
@@ -2077,6 +2234,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
                     case .left: glasses.leftBattery = level
                     case .right: glasses.rightBattery = level
                     }
+                    objectWillChange.send()
                 }
             }
 
@@ -2124,6 +2282,19 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     }
 
     private func handleTiltDashboardFallbackIfNeeded(_ event: G1Event) {
+        // Navigation uses head-up/down to swap its custom map bitmap. The stock
+        // dashboard shares the display surface and would cover that bitmap, so
+        // navigation has exclusive ownership of tilt events for the session.
+        guard navigationSessionState == .inactive else {
+            return
+        }
+
+        // Same reasoning for any other feature drawing its own content, such as
+        // the notification mirror showing an icon or a message being read.
+        guard !isCustomDisplaySurfaceClaimed else {
+            return
+        }
+
         guard let config = tiltDashboardConfig, config.enabled else {
             return
         }

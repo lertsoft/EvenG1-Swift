@@ -4,13 +4,14 @@ import EvenG1Core
 /// Raw UART log and gesture-event inspector. Reachable only from Developer Tools.
 struct LogsView: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
+    @EnvironmentObject private var diagnostics: G1DiagnosticsStore
     @State private var showEvents = false
 
     var body: some View {
         VStack(spacing: 0) {
             Picker("View", selection: $showEvents) {
-                Text("Logs (\(bluetoothManager.logs.count))").tag(false)
-                Text("Events (\(bluetoothManager.events.count))").tag(true)
+                Text("Logs (\(diagnostics.logs.count))").tag(false)
+                Text("Events (\(diagnostics.events.count))").tag(true)
             }
             .pickerStyle(.segmented)
             .padding()
@@ -34,10 +35,10 @@ struct LogsView: View {
 }
 
 struct LogsListView: View {
-    @EnvironmentObject private var bluetoothManager: G1BluetoothManager
+    @EnvironmentObject private var diagnostics: G1DiagnosticsStore
 
     var body: some View {
-        if bluetoothManager.logs.isEmpty {
+        if diagnostics.logs.isEmpty {
             ContentUnavailableView {
                 Label("No Logs", systemImage: "doc.text")
             } description: {
@@ -46,7 +47,7 @@ struct LogsListView: View {
             .accessibilityIdentifier("logs.emptyState")
         } else {
             List {
-                ForEach(bluetoothManager.logs.reversed()) { entry in
+                ForEach(diagnostics.logs.reversed()) { entry in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text(entry.level.rawValue)
@@ -78,10 +79,10 @@ struct LogsListView: View {
 }
 
 struct EventsListView: View {
-    @EnvironmentObject private var bluetoothManager: G1BluetoothManager
+    @EnvironmentObject private var diagnostics: G1DiagnosticsStore
 
     var body: some View {
-        if bluetoothManager.events.isEmpty {
+        if diagnostics.events.isEmpty {
             ContentUnavailableView {
                 Label("No Events", systemImage: "hand.tap")
             } description: {
@@ -90,8 +91,8 @@ struct EventsListView: View {
             .accessibilityIdentifier("events.emptyState")
         } else {
             List {
-                ForEach(bluetoothManager.events.indices, id: \.self) { index in
-                    Text(bluetoothManager.events[index].displayString)
+                ForEach(diagnostics.events.indices, id: \.self) { index in
+                    Text(diagnostics.events[index].displayString)
                         .font(.body)
                 }
             }

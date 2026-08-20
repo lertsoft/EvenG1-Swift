@@ -2,6 +2,7 @@ import Combine
 import CoreLocation
 import EvenG1Core
 import Foundation
+import UIKit
 
 @MainActor
 final class MTATrainViewModel: ObservableObject {
@@ -27,6 +28,8 @@ final class MTATrainViewModel: ObservableObject {
     @Published private(set) var selectedStation: MTAStationSelection?
     /// Page currently mirrored to the glasses, so the app can preview it.
     @Published private(set) var currentVisualPage: MTAVisualPage?
+    /// Cached preview image from the last single-pass render; never rasterized in SwiftUI body.
+    @Published private(set) var currentVisualImage: UIImage?
     @Published private(set) var visualPageIndexText = "Page 0/0"
     @Published private(set) var bitmapDeliveryStatus = "Bitmap idle"
     @Published private(set) var lockStatusText = "Auto-nearest"
@@ -42,13 +45,14 @@ final class MTATrainViewModel: ObservableObject {
     private weak var bluetoothManager: G1BluetoothManager?
 
     private var autoRefreshTask: Task<Void, Never>?
-    private var isWidgetActive = false
+    private(set) var isWidgetActive = false
     private var lastTiltRefreshAt: Date?
     private var lastEdgeRefreshAt: Date?
     private var currentPages: [MTAVisualPage] = []
     private var latestAlerts: [MTAServiceAlert] = []
     private var lastKnownUserCoordinate: CLLocationCoordinate2D?
     private var cancellables = Set<AnyCancellable>()
+    private var bitmapRenderGeneration: UInt64 = 0
 
     private let tiltRefreshDebounceSeconds: TimeInterval = 2.0
     private let edgeRefreshCooldownSeconds: TimeInterval = 2.0
@@ -87,7 +91,9 @@ final class MTATrainViewModel: ObservableObject {
     /// Whether the transit widget is on screen. Gates auto-refresh and glasses
     /// gestures so the widget never fights another feature for the display.
     func setWidgetActive(_ isActive: Bool) {
+        guard isWidgetActive != isActive else { return }
         isWidgetActive = isActive
+        bitmapRenderGeneration &+= 1
         updateAutoRefreshTask()
     }
 
@@ -183,6 +189,7 @@ final class MTATrainViewModel: ObservableObject {
             syncCurrentStationPreferenceMode()
             rebuildVisualPages(resetToFirst: true)
             await sendCurrentPageToGlassesIfConnected()
+            DatadogTelemetryService.shared.trackTiming(name: "transit_refresh_complete")
         } catch {
             // Disabling auto-refresh or leaving the tab cancels the task. That
             // lifecycle event should not replace valid results with an error.
@@ -203,6 +210,7 @@ final class MTATrainViewModel: ObservableObject {
                 currentPages = []
                 latestAlerts = []
                 visualPageIndexText = "Page 0/0"
+                currentVisualImage = nil
                 bitmapDeliveryStatus = "Bitmap idle"
             } else {
                 // Preserve the last good snapshot during transient failures.
@@ -217,6 +225,13 @@ final class MTATrainViewModel: ObservableObject {
 
     func handleGlassesEvent(_ event: G1Event) async {
         guard isWidgetActive else {
+            return
+        }
+        // Navigation owns the glasses display during an active trip. In
+        // particular, transit's head-down handler must not clear the route map.
+        guard bluetoothManager?.navigationSessionState != .active,
+              bluetoothManager?.navigationSessionState != .rerouting,
+              bluetoothManager?.navigationSessionState != .arrived else {
             return
         }
 
@@ -291,6 +306,7 @@ final class MTATrainViewModel: ObservableObject {
         let total = currentPages.count
         if total == 0 {
             currentVisualPage = nil
+            currentVisualImage = nil
             visualPageIndexText = "Page 0/0"
             return
         }
@@ -298,27 +314,77 @@ final class MTATrainViewModel: ObservableObject {
         visualPageIndexText = "Page \(currentPageIndex + 1)/\(total)"
     }
 
+    private func renderCurrentPage() async -> MTABitmapRenderer.RenderedPage? {
+        guard currentPages.indices.contains(currentPageIndex) else {
+            return nil
+        }
+
+        let page = currentPages[currentPageIndex]
+        let renderer = bitmapRenderer
+        let renderStartedAt = ContinuousClock.now
+
+        let rendered = try? await Task.detached(priority: .userInitiated) {
+            try renderer.render(page: page)
+        }.value
+
+        let renderDurationMs = Int64(renderStartedAt.duration(to: ContinuousClock.now) / .milliseconds(1))
+        DatadogTelemetryService.shared.trackTiming(name: "bitmap_render_complete")
+        DatadogTelemetryService.shared.trackAction(
+            type: .custom,
+            name: "bitmap_render_duration",
+            attributes: ["duration_ms": renderDurationMs]
+        )
+
+        return rendered
+    }
+
     private func sendCurrentPageToGlassesIfConnected() async {
+        guard isWidgetActive else { return }
+        bitmapRenderGeneration &+= 1
+        let generation = bitmapRenderGeneration
+        let pageIndex = currentPageIndex
+
         guard bluetoothManager?.connectionState == .fullyConnected else {
             bitmapDeliveryStatus = "Results shown in app (glasses disconnected)"
+            if let rendered = await renderCurrentPage(),
+               isWidgetActive,
+               generation == bitmapRenderGeneration,
+               pageIndex == currentPageIndex {
+                currentVisualImage = rendered.image
+            }
             return
         }
 
         guard currentPages.indices.contains(currentPageIndex) else {
             bitmapDeliveryStatus = "No page to render"
+            currentVisualImage = nil
             return
         }
 
-        let page = currentPages[currentPageIndex]
-        do {
-            let frame = try bitmapRenderer.render(page: page)
-            let sent = await bluetoothManager?.sendBitmap(frame) ?? false
-            if sent {
-                bitmapDeliveryStatus = "Bitmap \(currentPageIndex + 1)/\(currentPages.count)"
-                return
-            }
-        } catch {
-            // Fall through to text fallback.
+        guard let rendered = await renderCurrentPage() else {
+            guard isWidgetActive, generation == bitmapRenderGeneration else { return }
+            bitmapDeliveryStatus = "Bitmap failed, used text fallback"
+            currentVisualImage = nil
+            sendTextFallbackForCurrentPage()
+            return
+        }
+
+        guard isWidgetActive,
+              generation == bitmapRenderGeneration,
+              pageIndex == currentPageIndex else {
+            return
+        }
+        currentVisualImage = rendered.image
+
+        let sent = await bluetoothManager?.sendBitmap(rendered.frame) ?? false
+        guard isWidgetActive,
+              generation == bitmapRenderGeneration,
+              pageIndex == currentPageIndex else {
+            return
+        }
+        if sent {
+            bitmapDeliveryStatus = "Bitmap \(currentPageIndex + 1)/\(currentPages.count)"
+            return
         }
 
         bitmapDeliveryStatus = "Bitmap failed, used text fallback"
@@ -403,9 +469,10 @@ final class MTATrainViewModel: ObservableObject {
         }
 
         autoRefreshTask = Task { [weak self] in
-            guard let self else { return }
             while !Task.isCancelled {
-                await self.refreshNow(trigger: .autoTimer)
+                guard self != nil else { return }
+                await self?.refreshNow(trigger: .autoTimer)
+                guard let refreshIntervalSeconds = self?.refreshIntervalSeconds else { return }
                 do {
                     try await Task.sleep(for: .seconds(Int64(clamping: refreshIntervalSeconds)))
                 } catch {

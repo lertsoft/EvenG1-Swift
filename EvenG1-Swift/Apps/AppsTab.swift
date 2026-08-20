@@ -6,7 +6,9 @@ import EvenG1Core
 /// a row here rather than another section on a shared scroll view.
 struct AppsTab: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
-    @ObservedObject var transitViewModel: MTATrainViewModel
+
+    let transitSubtitle: String
+    let transitViewModel: MTATrainViewModel
 
     var body: some View {
         NavigationStack {
@@ -33,7 +35,7 @@ struct AppsTab: View {
                     } label: {
                         HUDAppCard(
                             title: "Notifications",
-                            subtitle: "Push a message to the lens",
+                            subtitle: "Envelope on the lens, tilt up to read",
                             icon: "bell.badge.fill",
                             tint: .orange
                         )
@@ -58,16 +60,6 @@ struct AppsTab: View {
             .navigationTitle("Heads-Up")
             .navigationBarTitleDisplayMode(.large)
         }
-        .onAppear {
-            transitViewModel.bind(bluetoothManager: bluetoothManager)
-        }
-    }
-
-    private var transitSubtitle: String {
-        if let station = transitViewModel.selectedStation {
-            return station.stationName
-        }
-        return "Next trains at your station"
     }
 }
 

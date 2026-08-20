@@ -14,8 +14,6 @@ struct TransitWidgetView: View {
     @State private var isStationPickerPresented = false
     @State private var isConfiguring = false
 
-    private let bitmapRenderer = MTABitmapRenderer()
-
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -114,8 +112,8 @@ struct TransitWidgetView: View {
     private var hudPreview: some View {
         VStack(alignment: .leading, spacing: 8) {
             GlassesHUDPreviewCard(title: "On your glasses") {
-                if let page = viewModel.currentVisualPage {
-                    Image(uiImage: bitmapRenderer.renderImage(page: page))
+                if let image = viewModel.currentVisualImage {
+                    Image(uiImage: image)
                         .resizable()
                         .interpolation(.none)
                         .aspectRatio(contentMode: .fit)

@@ -61,12 +61,12 @@ enum DiagnosticsBundle {
             """
         )
 
-        let logLines = bluetoothManager.logs.map { entry in
+        let logLines = bluetoothManager.diagnostics.logs.map { entry in
             "\(entry.formattedTime) [\(entry.level.rawValue)] \(entry.message)"
         }
         sections.append("== Logs (\(logLines.count)) ==\n" + (logLines.isEmpty ? "none" : logLines.joined(separator: "\n")))
 
-        let eventLines = bluetoothManager.events.map(\.displayString)
+        let eventLines = bluetoothManager.diagnostics.events.map(\.displayString)
         sections.append("== Events (\(eventLines.count)) ==\n" + (eventLines.isEmpty ? "none" : eventLines.joined(separator: "\n")))
 
         let trace = bluetoothManager.exportNavigationTraceJSONL()

@@ -87,7 +87,30 @@ Revisit both before shipping a build with credentials baked in.
 
 ## Verification
 
-This project is iOS-only (Datadog RUM requires UIKit). In Xcode, select an iPhone or Simulator destination — not My Mac — then run Product > Test for `EvenG1CoreTests`.
+This project is iOS-only (Datadog RUM requires UIKit). Run the full test suite from Xcode (**Product → Test**) or from the CLI with an iPhone Simulator destination.
+
+Run all verification tests (unit + UI):
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
+  -project EvenG1-Swift.xcodeproj \
+  -scheme EvenG1-Swift \
+  -testPlan Verification \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+Run only the core unit tests:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
+  -project EvenG1-Swift.xcodeproj \
+  -scheme EvenG1-Swift \
+  -testPlan Verification \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -only-testing:EvenG1CoreTests \
+  CODE_SIGNING_ALLOWED=NO
+```
 
 Build the iOS app without code signing:
 
@@ -129,6 +152,7 @@ with the raw UART log and event inspector, the navigation transport trace and it
 `.jsonl` evidence export, microphone and LC3 codec counters, text-transport
 fixtures, and a reference for the vendor byte commands. The flag is persisted but
 forced off under `--ui-testing` so UI tests always start from a consumer build.
+The notification mirror's enable flag behaves the same way.
 
 `GlassesHUDPreview` (`EvenG1-Swift/Shared`) renders content at the display's real
 576×135 pixel size, so previews wrap and truncate the way the glasses will. The

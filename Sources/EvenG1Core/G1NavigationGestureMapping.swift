@@ -26,10 +26,14 @@ public struct G1NavigationGestureMapper {
             return .repeatCurrentInstruction
         case .singleTap:
             return .announceStatus
-        case .swipeForward:
-            return .previewNextStep
-        case .swipeBackward:
-            return .previewPreviousStep
+        case .swipeForward, .swipeBackward:
+            // The right temple reports swipes the wearer never made, always as
+            // perfectly alternating forward/backward pairs (19 pairs in one
+            // 3.5-minute session with no touch input). Acting on them replaced
+            // the live map with step previews and forced a bitmap upload every
+            // couple of seconds, so navigation ignores them and step previews
+            // stay on the phone.
+            return nil
         case .tripleTap:
             return .recenterToLiveStep
         case .pressAndHold:

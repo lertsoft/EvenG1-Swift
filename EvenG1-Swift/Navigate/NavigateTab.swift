@@ -1,9 +1,12 @@
 import SwiftUI
 import MapKit
+import UIKit
 import EvenG1Core
 
 struct NavigateTab: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
+    @EnvironmentObject private var glassesEvents: G1GlassesEventNotifier
+    @Environment(\.scenePhase) private var scenePhase
 
     let isActive: Bool
 
@@ -11,6 +14,8 @@ struct NavigateTab: View {
     @State private var selectedFavoriteForRemoval: NavigationFavorite?
     @State private var isConfirmingStop = false
     @State private var isHUDPreviewVisible = false
+    @State private var hasReportedMapReady = false
+    @State private var showFavoriteActionAlert = false
 
     private var isTripActive: Bool {
         switch viewModel.state {
@@ -21,36 +26,64 @@ struct NavigateTab: View {
         }
     }
 
-    var body: some View {
-        NavigationStack {
-            ZStack(alignment: .top) {
-                mapLayer
+    private var removeFavoriteAlertPresented: Binding<Bool> {
+        Binding(
+            get: { selectedFavoriteForRemoval != nil },
+            set: { isPresented in
+                if !isPresented {
+                    selectedFavoriteForRemoval = nil
+                }
+            }
+        )
+    }
 
-                VStack(spacing: 12) {
-                    header
-                    searchField
-                    suggestionsPanel
-                    if viewModel.isOverlayVisible {
-                        maneuverBanner
-                    }
-                    if isHUDPreviewVisible {
-                        hudPreviewPanel
-                    }
+    private var stopConfirmationTitle: String {
+        let destination = viewModel.destinationTitle.isEmpty
+            ? "this destination"
+            : viewModel.destinationTitle
+        return "End navigation to \(destination)?"
+    }
+
+    var body: some View {
+        navigationContent
+            .onAppear {
+                viewModel.setAppActive(scenePhase == .active)
+            }
+            .onChange(of: scenePhase) { _, newValue in
+                viewModel.setAppActive(newValue == .active)
+            }
+    }
+
+    private var navigationContent: some View {
+        NavigationStack {
+            ZStack {
+                if isActive {
+                    mapLayer
+                        .ignoresSafeArea()
+                } else {
+                    Color.black
+                        .ignoresSafeArea()
+                }
+
+                VStack(spacing: 0) {
+                    topOverlay
                     Spacer()
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
 
-                VStack {
-                    Spacer()
+                locateButtonOverlay
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 10) {
+                    if viewModel.needsLocationPermission {
+                        locationPermissionBanner
+                    }
                     bottomPanel
                 }
             }
             .background(Color.black)
-            .ignoresSafeArea(edges: .bottom)
             .navigationBarHidden(true)
             .confirmationDialog(
-                "End navigation to \(viewModel.destinationTitle.isEmpty ? "this destination" : viewModel.destinationTitle)?",
+                stopConfirmationTitle,
                 isPresented: $isConfirmingStop,
                 titleVisibility: .visible
             ) {
@@ -65,19 +98,29 @@ struct NavigateTab: View {
             }
             .onChange(of: isActive) { _, newValue in
                 viewModel.setNavigateTabActive(newValue)
+                if newValue {
+                    hasReportedMapReady = false
+                }
             }
-            .onChange(of: bluetoothManager.eventRevision) { _, _ in
-                guard let latest = bluetoothManager.events.first else {
+            .onChange(of: glassesEvents.revision) { _, _ in
+                guard let latest = glassesEvents.latestEvent else {
                     return
                 }
                 Task {
                     await viewModel.handleGlassesEvent(latest)
                 }
             }
-            .alert("Remove Favorite", isPresented: Binding(
-                get: { selectedFavoriteForRemoval != nil },
-                set: { if !$0 { selectedFavoriteForRemoval = nil } }
-            )) {
+            .onChange(of: viewModel.favoriteActionMessage) { _, message in
+                showFavoriteActionAlert = message != nil
+            }
+            .alert("Favorites", isPresented: $showFavoriteActionAlert) {
+                Button("OK") {
+                    viewModel.clearFavoriteActionMessage()
+                }
+            } message: {
+                Text(viewModel.favoriteActionMessage ?? "")
+            }
+            .alert("Remove Favorite", isPresented: removeFavoriteAlertPresented) {
                 Button("Remove", role: .destructive) {
                     if let favorite = selectedFavoriteForRemoval {
                         viewModel.removeFavorite(id: favorite.id)
@@ -115,7 +158,16 @@ struct NavigateTab: View {
                 }
             }
         }
-        .mapStyle(.standard(elevation: .realistic, emphasis: .muted))
+        .mapStyle(.standard(elevation: .flat, emphasis: .muted))
+        .colorScheme(.dark)
+        .onMapCameraChange(frequency: .onEnd) { _ in
+            viewModel.userDidMoveMap()
+        }
+        .onAppear {
+            guard !hasReportedMapReady else { return }
+            hasReportedMapReady = true
+            DatadogTelemetryService.shared.trackTiming(name: "map_ready")
+        }
         .overlay(alignment: .top) {
             LinearGradient(
                 colors: [Color.black.opacity(0.55), Color.clear],
@@ -127,7 +179,38 @@ struct NavigateTab: View {
         }
     }
 
-    private var header: some View {
+    private var topOverlay: some View {
+        VStack(spacing: 12) {
+            if viewModel.showsNavigationControls {
+                tripHeader
+            } else {
+                idleHeader
+            }
+
+            searchField
+            suggestionsPanel
+
+            if viewModel.showsNavigationControls {
+                if viewModel.isOverlayVisible {
+                    maneuverBanner
+                }
+                if isHUDPreviewVisible {
+                    hudPreviewPanel
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+    }
+
+    private var idleHeader: some View {
+        Text("Navigate")
+            .font(.title2.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+    }
+
+    private var tripHeader: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(isTripActive ? viewModel.destinationTitle : "Navigate")
@@ -189,6 +272,64 @@ struct NavigateTab: View {
         }
     }
 
+    private var locateButtonOverlay: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Button {
+                    Task { await viewModel.centerOnUser() }
+                } label: {
+                    Image(systemName: "location.fill")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(viewModel.isFollowingUser ? Color.cyan : .white)
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                }
+                .accessibilityLabel("Center on my location")
+                .accessibilityIdentifier("navigation.locateUserButton")
+
+                Spacer()
+            }
+            .padding(.leading, 16)
+            .padding(.bottom, 16)
+        }
+    }
+
+    private var locationPermissionBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "location.slash.fill")
+                .foregroundStyle(.orange)
+
+            Text("Location access needed to center the map")
+                .font(.footnote)
+                .foregroundStyle(.white)
+                .lineLimit(2)
+
+            Spacer(minLength: 0)
+
+            if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                Link("Settings", destination: settingsURL)
+                    .font(.footnote.weight(.semibold))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.black.opacity(0.72))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 10)
+        .accessibilityIdentifier("navigation.locationPermissionBanner")
+    }
+
     private var hudPreviewPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
@@ -198,15 +339,26 @@ struct NavigateTab: View {
                         .foregroundStyle(.orange)
                 }
                 Spacer()
+                Text(viewModel.glassesDisplayDetailLabel)
+                Text("·")
                 Text(viewModel.transportModeLabel)
             }
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            GlassesHUDPreview(
-                text: viewModel.hudInstructionText,
-                placeholder: "Pick a destination to preview guidance"
-            )
+            if let image = viewModel.currentNavVisualImage {
+                GlassesHUDFrame {
+                    Image(uiImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                }
+            } else {
+                GlassesHUDPreview(
+                    text: viewModel.hudInstructionText,
+                    placeholder: "Pick a destination to preview guidance"
+                )
+            }
         }
         .padding(12)
         .background(
@@ -226,13 +378,20 @@ struct NavigateTab: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
 
-                TextField("Search destination", text: $viewModel.searchQuery)
-                    .textInputAutocapitalization(.words)
-                    .autocorrectionDisabled()
-                    .foregroundStyle(.white)
-                    .onChange(of: viewModel.searchQuery) { _, newValue in
-                        viewModel.updateSearchQuery(newValue)
-                    }
+                TextField(
+                    viewModel.showsNavigationControls ? "Search destination" : "Search",
+                    text: $viewModel.searchQuery
+                )
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+                .foregroundStyle(.white)
+                .submitLabel(.search)
+                .onSubmit {
+                    Task { await viewModel.submitSearchQuery() }
+                }
+                .onChange(of: viewModel.searchQuery) { _, newValue in
+                    viewModel.updateSearchQuery(newValue)
+                }
 
                 if !viewModel.searchQuery.isEmpty {
                     Button {
@@ -255,7 +414,9 @@ struct NavigateTab: View {
                     )
             )
 
-            modePicker
+            if viewModel.showsNavigationControls {
+                modePicker
+            }
         }
     }
 
@@ -347,9 +508,11 @@ struct NavigateTab: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
-            ProgressView(value: viewModel.progressFraction)
-                .tint(.green)
-                .background(.white.opacity(0.1))
+            if isTripActive {
+                ProgressView(value: viewModel.progressFraction)
+                    .tint(.green)
+                    .background(.white.opacity(0.1))
+            }
         }
         .padding(12)
         .background(
@@ -399,6 +562,16 @@ struct NavigateTab: View {
 
                 Spacer()
 
+                Button {
+                    Task { await viewModel.addCustomFavorite() }
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.cyan)
+                }
+                .accessibilityLabel("Add favorite location")
+                .accessibilityIdentifier("navigation.addFavoriteButton")
+
                 primaryAction
             }
 
@@ -415,7 +588,7 @@ struct NavigateTab: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 14)
-        .padding(.bottom, 22)
+        .padding(.bottom, 10)
         .background(
             RoundedRectangle(cornerRadius: 22)
                 .fill(Color.black.opacity(0.64))
@@ -425,12 +598,13 @@ struct NavigateTab: View {
                 )
         )
         .padding(.horizontal, 10)
+        .padding(.bottom, 6)
     }
 
     private var primaryAction: some View {
         Group {
             switch viewModel.state {
-            case .routePreview, .arrived:
+            case .routePreview where viewModel.routePolyline != nil, .arrived:
                 Button {
                     Task { await viewModel.startNavigation() }
                 } label: {
@@ -447,7 +621,7 @@ struct NavigateTab: View {
                 }
                 .buttonStyle(.bordered)
 
-            case .idle, .searching, .error:
+            case .idle, .searching, .routePreview, .error:
                 EmptyView()
             }
         }
@@ -495,36 +669,38 @@ struct NavigateTab: View {
                 if favorite.isConfigured {
                     await viewModel.previewFavorite(favorite)
                 } else if favorite.kind == .home || favorite.kind == .office {
-                    viewModel.setFavorite(kind: favorite.kind)
+                    await viewModel.saveFavorite(kind: favorite.kind)
                 }
             }
         }
     }
 
     private var addLocationCard: some View {
-        VStack(alignment: .center, spacing: 10) {
-            Image(systemName: "plus")
-                .font(.largeTitle.weight(.light))
-                .foregroundStyle(.white)
+        Button {
+            Task { await viewModel.addCustomFavorite() }
+        } label: {
+            VStack(alignment: .center, spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.largeTitle.weight(.light))
+                    .foregroundStyle(.white)
 
-            Text("Add")
-                .font(.title3.weight(.medium))
-                .foregroundStyle(.white)
+                Text("Add")
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(.white)
 
-            Text("Location")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                Text("Location")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 120)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.white.opacity(0.07))
+            )
         }
-        .frame(width: 120)
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.white.opacity(0.07))
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 14))
-        .onTapGesture {
-            viewModel.addCurrentAsCustomFavorite()
-        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("navigation.addFavoriteCard")
     }
 
     private func iconName(for kind: NavigationFavoriteKind) -> String {

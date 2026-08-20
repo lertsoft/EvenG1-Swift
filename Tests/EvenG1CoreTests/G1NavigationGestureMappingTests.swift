@@ -5,8 +5,8 @@ final class G1NavigationGestureMappingTests: XCTestCase {
     func testGestureMappingsWhenNavigationIsActive() {
         XCTAssertEqual(G1NavigationGestureMapper.action(for: .doubleTap, isNavigationActive: true), .repeatCurrentInstruction)
         XCTAssertEqual(G1NavigationGestureMapper.action(for: .singleTap, isNavigationActive: true), .announceStatus)
-        XCTAssertEqual(G1NavigationGestureMapper.action(for: .swipeForward, isNavigationActive: true), .previewNextStep)
-        XCTAssertEqual(G1NavigationGestureMapper.action(for: .swipeBackward, isNavigationActive: true), .previewPreviousStep)
+        XCTAssertNil(G1NavigationGestureMapper.action(for: .swipeForward, isNavigationActive: true))
+        XCTAssertNil(G1NavigationGestureMapper.action(for: .swipeBackward, isNavigationActive: true))
         XCTAssertEqual(G1NavigationGestureMapper.action(for: .tripleTap, isNavigationActive: true), .recenterToLiveStep)
         XCTAssertEqual(G1NavigationGestureMapper.action(for: .pressAndHold, isNavigationActive: true), .endNavigation)
         XCTAssertEqual(G1NavigationGestureMapper.action(for: .pressAndRelease, isNavigationActive: true), .toggleMute)

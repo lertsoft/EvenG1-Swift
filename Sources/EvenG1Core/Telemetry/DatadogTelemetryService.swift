@@ -77,6 +77,7 @@ public final class DatadogTelemetryService: @unchecked Sendable {
             longTaskThreshold: config.longTaskThreshold,
             appHangThreshold: config.appHangThreshold,
             trackWatchdogTerminations: config.trackWatchdogTerminations,
+            vitalsUpdateFrequency: config.vitalsUpdateFrequency.sdkValue,
             telemetrySampleRate: config.telemetrySampleRate
         )
         RUM.enable(with: rumConfig)
@@ -153,6 +154,12 @@ public final class DatadogTelemetryService: @unchecked Sendable {
         RUMMonitor.shared().addFeatureFlagEvaluation(name: name, value: value)
     }
 
+    /// Record a custom performance timing on the active RUM view.
+    public func trackTiming(name: String) {
+        guard isInitialized else { return }
+        RUMMonitor.shared().addTiming(name: name)
+    }
+
     /// Track hardware-specific state (e.g. G1 Bluetooth connection state, battery level).
     public func trackHardwareEvent(name: String, state: String, attributes: [String: Encodable] = [:]) {
         var mergedAttributes = attributes
@@ -206,6 +213,17 @@ private extension TelemetryLogLevel {
         case .warn: return .warn
         case .error: return .error
         case .critical: return .critical
+        }
+    }
+}
+
+private extension TelemetryVitalsUpdateFrequency {
+    var sdkValue: RUM.Configuration.VitalsFrequency? {
+        switch self {
+        case .frequent: return .frequent
+        case .average: return .average
+        case .rare: return .rare
+        case .disabled: return nil
         }
     }
 }

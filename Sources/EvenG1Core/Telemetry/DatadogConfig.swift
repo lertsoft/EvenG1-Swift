@@ -29,6 +29,7 @@ public struct DatadogConfig: Sendable {
     public var trackWatchdogTerminations: Bool
     public var longTaskThreshold: TimeInterval?
     public var appHangThreshold: TimeInterval?
+    public var vitalsUpdateFrequency: TelemetryVitalsUpdateFrequency
     public var trackingConsent: Consent
     public var logsSampleRate: Float
     public var logsRemoteThreshold: TelemetryLogLevel
@@ -45,6 +46,7 @@ public struct DatadogConfig: Sendable {
         trackWatchdogTerminations: Bool = true,
         longTaskThreshold: TimeInterval? = 0.25,
         appHangThreshold: TimeInterval? = 2.0,
+        vitalsUpdateFrequency: TelemetryVitalsUpdateFrequency = .frequent,
         trackingConsent: Consent = .granted,
         logsSampleRate: Float = 100.0,
         logsRemoteThreshold: TelemetryLogLevel = .info
@@ -60,6 +62,7 @@ public struct DatadogConfig: Sendable {
         self.trackWatchdogTerminations = trackWatchdogTerminations
         self.longTaskThreshold = longTaskThreshold
         self.appHangThreshold = appHangThreshold
+        self.vitalsUpdateFrequency = vitalsUpdateFrequency
         self.trackingConsent = trackingConsent
         self.logsSampleRate = logsSampleRate
         self.logsRemoteThreshold = logsRemoteThreshold
@@ -128,6 +131,14 @@ public enum TelemetryLogLevel: Int, Sendable, Comparable {
     public static func < (lhs: TelemetryLogLevel, rhs: TelemetryLogLevel) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
+}
+
+/// Mobile vitals sampling cadence for RUM frozen-frame and memory charts.
+public enum TelemetryVitalsUpdateFrequency: Sendable {
+    case frequent
+    case average
+    case rare
+    case disabled
 }
 
 /// RUM action kinds used by EvenG1Core. Mapped to Datadog `RUMActionType` on iOS.

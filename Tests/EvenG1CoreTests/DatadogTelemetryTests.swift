@@ -50,6 +50,13 @@ final class DatadogTelemetryTests: XCTestCase {
         XCTAssertTrue(config.trackWatchdogTerminations)
         XCTAssertEqual(config.longTaskThreshold, 0.25)
         XCTAssertEqual(config.appHangThreshold, 2.0)
+        XCTAssertEqual(config.vitalsUpdateFrequency, .frequent)
+    }
+
+    func testTrackTimingDoesNotCrashInMockMode() {
+        let service = DatadogTelemetryService.shared
+        service.initialize(config: DatadogConfig(clientToken: "", applicationID: ""))
+        service.trackTiming(name: "test_timing")
     }
     
     func testDatadogTelemetryServiceInitializationWithMissingTokenDoesNotCrash() {
