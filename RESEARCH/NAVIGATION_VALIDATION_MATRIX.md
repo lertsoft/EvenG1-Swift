@@ -46,10 +46,10 @@
   text during an active route.
 - Export trace JSONL and confirm mode switch entries are present.
 
-8. Slow/offline map tiles
+8. Slow/offline network
 - Start navigation with constrained or unavailable networking.
 - Verify the immediate vector route remains usable.
-- Verify a delayed snapshot cannot upload after navigation has stopped.
+- Verify lens rendering performs no MapKit snapshot request.
 
 9. Binocular alignment A/B
 - Record the current eye-distance and height settings from Device → Glasses

@@ -36,6 +36,8 @@ final class NotificationMirrorViewModel: ObservableObject {
 
     /// FIFO chain so a later display command cannot overtake an earlier one.
     private var displayTask: Task<Void, Never>?
+    /// Invalidates display work that was queued for a previous lens owner.
+    private var displayGeneration: UInt64 = 0
     private var readTimeoutTask: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard) {
@@ -91,6 +93,7 @@ final class NotificationMirrorViewModel: ObservableObject {
         guard isConnected != connected else { return }
         isConnected = connected
         if !connected {
+            cancelDisplayWork()
             // The lens is blank after a disconnect and unread state would be
             // stale by the time the glasses come back.
             apply(.reset)
@@ -98,7 +101,7 @@ final class NotificationMirrorViewModel: ObservableObject {
                 statusMessage = "Glasses disconnected."
             }
         } else if isEnabled {
-            statusMessage = "Waiting for a notification."
+            reassertCurrentDisplay()
         }
     }
 
@@ -176,10 +179,40 @@ final class NotificationMirrorViewModel: ObservableObject {
     // MARK: - State machine plumbing
 
     private func syncSuspension() {
-        if isNavigationOwningDisplay || !isAppActive {
+        if isNavigationOwningDisplay {
+            cancelDisplayWork()
             apply(.suspend)
+        } else if !isAppActive {
+            let wasOwningDisplay = mirror.ownsDisplay
+            cancelDisplayWork()
+            apply(.suspend)
+            // Unlike navigation, the background transition has no new owner
+            // that will paint over private notification content.
+            if wasOwningDisplay {
+                enqueueDisplay(.clear)
+            }
         } else {
             apply(.resume)
+        }
+    }
+
+    private func reassertCurrentDisplay() {
+        guard isAppActive, !isNavigationOwningDisplay else {
+            statusMessage = isNavigationOwningDisplay
+                ? "Paused while navigation uses the lens."
+                : "Paused while the app is in the background."
+            return
+        }
+
+        switch mirror.state {
+        case .iconVisible:
+            enqueueDisplay(.icon(pendingCount: mirror.pendingCount))
+        case .reading(let notification):
+            enqueueDisplay(.text(notification))
+        case .suspended:
+            apply(.resume)
+        case .idle:
+            statusMessage = "Waiting for a notification."
         }
     }
 
@@ -254,32 +287,51 @@ final class NotificationMirrorViewModel: ObservableObject {
 
     private func enqueueDisplay(_ display: G1NotificationMirrorDisplay) {
         let previous = displayTask
+        let generation = displayGeneration
         displayTask = Task { [weak self] in
             await previous?.value
-            await self?.performDisplay(display)
+            guard let self,
+                  !Task.isCancelled,
+                  generation == self.displayGeneration else {
+                return
+            }
+            await self.performDisplay(display, generation: generation)
         }
     }
 
-    private func performDisplay(_ display: G1NotificationMirrorDisplay) async {
+    private func cancelDisplayWork() {
+        displayGeneration &+= 1
+        displayTask?.cancel()
+        displayTask = nil
+    }
+
+    private func performDisplay(_ display: G1NotificationMirrorDisplay,
+                                generation: UInt64) async {
         // Deliberately not gated on `isEnabled`: turning the feature off produces a
         // clear, and skipping it would strand the envelope on the lens. Nothing can
         // be queued while disabled because `post` and `handleGlassesEvent` refuse.
         guard let bluetoothManager else { return }
         guard bluetoothManager.connectionState == .fullyConnected else { return }
+        guard generation == displayGeneration, !Task.isCancelled else { return }
 
         switch display {
         case .icon(let pendingCount):
+            guard isEnabled, isAppActive, !isNavigationOwningDisplay else { return }
             guard let frame = try? renderer.render(pendingCount: pendingCount).frame else {
                 statusMessage = "Could not render the notification icon."
                 return
             }
             _ = await bluetoothManager.sendBitmap(frame)
         case .text(let notification):
+            guard isEnabled, isAppActive, !isNavigationOwningDisplay else { return }
             // Awaited so a following clear cannot win the display gate first.
             _ = await bluetoothManager.sendTextAwaitingCompletion(
                 G1TextSendRequest(text: notification.lensText, mode: .text)
             )
         case .clear:
+            // A clear queued before navigation took ownership must not erase the
+            // route map after it finally reaches the display gate.
+            guard !isNavigationOwningDisplay else { return }
             _ = await bluetoothManager.clearDisplayAwaitingCompletion()
         }
     }

@@ -6,10 +6,14 @@ The G1 exposes one display surface. Text packets and bitmap uploads replace each
 other; they cannot be layered. During an active route, the navigation bitmap is
 therefore the only display output. It contains:
 
-- a local Apple Maps snapshot with roads and street labels;
-- the upcoming route drawn with a black halo and white center line;
+- app-authored route geometry drawn with a black halo and white center line;
 - a route-snapped user marker (GPS errors up to 75 m);
 - the next instruction, turn distance, and remaining time.
+
+The phone continues to use the attributed MapKit map. Apple Maps tile imagery is
+not copied to the external lens: the low-resolution derivative could not
+preserve readable Apple Maps attribution and would create a redistribution
+compliance risk.
 
 The current firmware NACKs the experimental native navigation command family.
 Navigation must not wait for those retries or downgrade to text, because that
@@ -23,22 +27,16 @@ text would replace the map.
    one-shot location.
 3. Render and upload a local vector route immediately.
 4. Configure app-driven head-up/down events asynchronously.
-5. Generate the network-backed `MKMapSnapshotter` image and replace the initial
-   frame when it is ready.
 
-This keeps the Start action independent of BLE ACK timeouts and MapKit tile
-latency. Snapshot generation and tilt setup are generation-guarded so a frame
-from a stopped route cannot be uploaded later.
+This keeps the Start action independent of BLE ACK timeouts and network latency.
+Rendering and tilt setup are generation-guarded so a frame from a stopped route
+cannot be uploaded later.
 
 ## Monochrome conversion
 
-MapKit dark-mode roads are much dimmer than labels. A threshold of 96 produced
-the observed "text-only map": labels survived while streets were discarded.
-Navigation uses a threshold of 42 and excludes POI icons/labels, retaining road
-geometry and street names without overwhelming the 576×135 one-bit display.
-
-The snapshot is cached by a quantized map rectangle. The route and instruction
-overlay can update without downloading/rendering identical map tiles.
+The app draws directly in black and white at 576×135 before bit-packing rows.
+Avoiding raster tile thresholding makes route and instruction contrast
+deterministic and removes MapKit snapshot latency from the upload path.
 
 ## Map window and the user marker
 
@@ -83,9 +81,9 @@ To distinguish a debugger/device-support disconnect from an app crash:
 
 ## Hardware validation
 
-- Start should show the initial route frame promptly, before map tiles finish.
-- The detailed snapshot should replace it without any intervening text frame.
-- Verify streets remain visible in one-bit output in bright and dim conditions.
+- Start should show the route frame promptly without waiting for a network call.
+- Verify the route, marker, and instructions remain visible in bright and dim
+  conditions.
 - Confirm logs contain `Head Up`/`Head Down`, and each gesture produces a
   `navigation_map_upload` with the expected detail level.
 - Stop navigation before starting another route and confirm no stale frame is

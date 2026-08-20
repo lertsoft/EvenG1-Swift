@@ -19,9 +19,9 @@ struct NavigateTab: View {
 
     private var isTripActive: Bool {
         switch viewModel.state {
-        case .navigating, .rerouting:
+        case .navigating, .rerouting, .arrived:
             return true
-        case .idle, .searching, .routePreview, .arrived, .error:
+        case .idle, .searching, .routePreview, .error:
             return false
         }
     }
@@ -604,7 +604,7 @@ struct NavigateTab: View {
     private var primaryAction: some View {
         Group {
             switch viewModel.state {
-            case .routePreview where viewModel.routePolyline != nil, .arrived:
+            case .routePreview where viewModel.routePolyline != nil:
                 Button {
                     Task { await viewModel.startNavigation() }
                 } label: {
@@ -612,6 +612,15 @@ struct NavigateTab: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.cyan)
+
+            case .arrived:
+                Button {
+                    Task { await viewModel.stopNavigation() }
+                } label: {
+                    Label("Done", systemImage: "checkmark.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
 
             case .navigating, .rerouting:
                 Button {

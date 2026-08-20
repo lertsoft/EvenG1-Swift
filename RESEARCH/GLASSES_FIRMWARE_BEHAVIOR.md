@@ -142,7 +142,9 @@ during the bitmap upload storm are the candidates.
 ## MapKit snapshot notes
 
 - `MKMapSnapshotter` always burns the Apple Maps logo into the bottom-left of
-  the image. The workaround is to request extra height and crop the bottom band
-  off before binarizing.
+  the image.
+- Cropping that attribution from imagery shown on an external display is not an
+  acceptable workaround. The lens renderer therefore uses only app-authored
+  route vectors; the attributed MapKit map remains on the phone.
 - `MKMapSnapshotOptions.scale` is honored on iOS but ignored on macOS, so the
   offline preview harness must crop by fraction rather than by pixel count.

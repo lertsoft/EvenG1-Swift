@@ -146,7 +146,6 @@ enum BatteryStyle {
 /// scan when there isn't one. Discovered pairs connect by tapping the row.
 private struct ConnectCard: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
-    @State private var sortedDiscoveredPairs: [(key: String, value: DiscoveredGlassesPair)] = []
 
     var body: some View {
         VStack(spacing: 14) {
@@ -195,11 +194,11 @@ private struct ConnectCard: View {
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 20))
-        .onChange(of: bluetoothManager.discoveredPairs.keys.sorted()) { _, _ in
-            sortedDiscoveredPairs = bluetoothManager.discoveredPairs.sorted { $0.key < $1.key }
-        }
-        .onAppear {
-            sortedDiscoveredPairs = bluetoothManager.discoveredPairs.sorted { $0.key < $1.key }
+    }
+
+    private var sortedDiscoveredPairs: [(key: String, value: DiscoveredGlassesPair)] {
+        bluetoothManager.discoveredPairs.sorted { lhs, rhs in
+            lhs.key.localizedCaseInsensitiveCompare(rhs.key) == .orderedAscending
         }
     }
 

@@ -4,30 +4,6 @@ import Foundation
 import MapKit
 import UIKit
 
-// #region agent log
-nonisolated private func agentLog(_ hypothesisId: String, _ message: String, _ data: [String: Any]) {
-    let payload: [String: Any] = [
-        "sessionId": "bf2a66", "runId": "zoom", "hypothesisId": hypothesisId,
-        "location": "NavigationBitmapRenderer.swift", "message": message, "data": data,
-        "timestamp": Int(Date().timeIntervalSince1970 * 1000)
-    ]
-    guard let json = try? JSONSerialization.data(withJSONObject: payload) else { return }
-    print("AGENTLOG-bf2a66 \(String(decoding: json, as: UTF8.self))")
-    guard let url = FileManager.default
-        .urls(for: .documentDirectory, in: .userDomainMask).first?
-        .appendingPathComponent("debug-bf2a66.log") else { return }
-    var line = json
-    line.append(0x0A)
-    if let handle = try? FileHandle(forWritingTo: url) {
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: line)
-    } else {
-        try? line.write(to: url)
-    }
-}
-// #endregion
-
 enum NavigationDisplayDetail: String, Sendable {
     /// Head level: the next stretch of the walk plus the streets around it.
     case minimal
@@ -43,26 +19,10 @@ enum NavigationDisplayDetail: String, Sendable {
         self == .minimal ? 260 : 800
     }
 
-    /// Allowed span of the wide (horizontal) axis of the map surface. The
-    /// canvas is a ~3.4:1 letterbox, so this also pins the vertical span to
-    /// roughly a third of these numbers.
-    ///
-    /// Head level stays around five short blocks so a walker reads the next
-    /// couple of turns instead of twenty streets of context; head up opens to
-    /// roughly three times that area.
-    nonisolated var mapSpanMeters: ClosedRange<CLLocationDistance> {
-        self == .minimal ? 700...1_100 : 2_000...3_400
-    }
-
     nonisolated var horizontalMargin: CGFloat {
         self == .minimal
             ? G1NavigationBitmapLayout.horizontalMargin
             : G1NavigationBitmapLayout.wideHorizontalMargin
-    }
-
-    /// Ceiling on the share of map pixels the street layer may light up.
-    nonisolated var maximumStreetInk: Double {
-        self == .minimal ? 0.30 : 0.40
     }
 
     nonisolated var routeLineWidth: CGFloat {
@@ -121,13 +81,6 @@ actor NavigationBitmapRenderer {
     struct RenderedScene: @unchecked Sendable {
         let image: UIImage
         let frame: G1BitmapFrame
-        /// False when the frame fell back to plain route geometry because map
-        /// tiles were not ready yet.
-        let usedMapTiles: Bool
-    }
-
-    private struct SnapshotBox: @unchecked Sendable {
-        let snapshot: MKMapSnapshotter.Snapshot
     }
 
     private struct Layout {
@@ -136,20 +89,16 @@ actor NavigationBitmapRenderer {
         let stats: CGRect
     }
 
-    private var cachedSnapshot: (key: String, snapshot: MKMapSnapshotter.Snapshot)?
-    private var inFlightSnapshot: (key: String, task: Task<SnapshotBox, Error>)?
-
-    /// Renders the scene, waiting at most `snapshotTimeout` for MapKit tiles.
-    /// When tiles are slow the frame is still produced from route geometry so
-    /// the glasses never sit on a stale or blank surface; the caller can
-    /// re-render shortly after to pick up the streets.
-    func render(scene: NavigationMapScene, snapshotTimeout: Duration) async throws -> RenderedScene {
-        let snapshot = await snapshot(for: scene, timeout: snapshotTimeout)
-        let image = renderImage(scene: scene, snapshot: snapshot)
-        return try makeRenderedScene(from: image, usedMapTiles: snapshot != nil)
+    /// Renders route geometry without redistributing Apple Maps imagery.
+    ///
+    /// MapKit remains the source for route planning and the attributed phone
+    /// map, while the external one-bit lens receives only app-authored vectors.
+    func render(scene: NavigationMapScene) throws -> RenderedScene {
+        let image = renderImage(scene: scene)
+        return try makeRenderedScene(from: image)
     }
 
-    private func makeRenderedScene(from image: UIImage, usedMapTiles: Bool) throws -> RenderedScene {
+    private func makeRenderedScene(from image: UIImage) throws -> RenderedScene {
         guard let cgImage = image.cgImage else {
             throw NavigationBitmapRendererError.imageBuildFailed
         }
@@ -170,134 +119,12 @@ actor NavigationBitmapRenderer {
             height: G1NavigationBitmapLayout.canvasHeight,
             bitPackedRows: packed
         )
-        return RenderedScene(image: image, frame: frame, usedMapTiles: usedMapTiles)
-    }
-
-    // MARK: - Map tiles
-
-    private func snapshot(for scene: NavigationMapScene,
-                          timeout: Duration) async -> MKMapSnapshotter.Snapshot? {
-        let layout = Self.layout(for: scene.detailLevel)
-        let visibleRect = Self.mapRect(for: scene, canvasSize: layout.map.size)
-        let mapRect = Self.attributionPaddedRect(visibleRect, mapHeight: layout.map.height)
-        let size = Self.snapshotSize(mapHeight: layout.map.height, width: layout.map.width)
-        let key = Self.snapshotCacheKey(mapRect: mapRect, detail: scene.detailLevel, size: size)
-
-        if let cachedSnapshot, cachedSnapshot.key == key {
-            return cachedSnapshot.snapshot
-        }
-
-        let task: Task<SnapshotBox, Error>
-        if let inFlightSnapshot, inFlightSnapshot.key == key {
-            task = inFlightSnapshot.task
-        } else {
-            inFlightSnapshot?.task.cancel()
-            let options = Self.snapshotOptions(mapRect: mapRect, size: size, detail: scene.detailLevel)
-            task = Task.detached(priority: .userInitiated) {
-                SnapshotBox(snapshot: try await MKMapSnapshotter(options: options).start())
-            }
-            inFlightSnapshot = (key, task)
-        }
-
-        let raced = await Self.firstResult(of: task, timeout: timeout)
-        switch raced {
-        case .success(let box):
-            cachedSnapshot = (key, box.snapshot)
-            if inFlightSnapshot?.key == key {
-                inFlightSnapshot = nil
-            }
-            return box.snapshot
-        case .failed:
-            // Let the next render retry instead of caching the failure.
-            if inFlightSnapshot?.key == key {
-                inFlightSnapshot = nil
-            }
-            return nil
-        case .timedOut:
-            return nil
-        }
-    }
-
-    private enum SnapshotRace {
-        case success(SnapshotBox)
-        case failed
-        case timedOut
-    }
-
-    /// Races the snapshot against a deadline without cancelling it, so a slow
-    /// snapshot still lands in the cache for the following frame.
-    private static func firstResult(of task: Task<SnapshotBox, Error>,
-                                    timeout: Duration) async -> SnapshotRace {
-        await withTaskGroup(of: SnapshotRace.self) { group in
-            group.addTask {
-                do {
-                    return .success(try await task.value)
-                } catch {
-                    return .failed
-                }
-            }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return .timedOut
-            }
-
-            let result = await group.next() ?? .timedOut
-            group.cancelAll()
-            return result
-        }
-    }
-
-    /// MKMapSnapshotter stamps the Apple logo into the bottom-left corner of
-    /// its image. Snapshots are taken this much taller than the visible map
-    /// surface and the extra band is dropped before drawing, so the logo never
-    /// reaches the glasses.
-    private static let attributionStripHeight: CGFloat = 28
-
-    nonisolated private static func snapshotSize(mapHeight: CGFloat, width: CGFloat) -> CGSize {
-        CGSize(width: width, height: mapHeight + attributionStripHeight)
-    }
-
-    /// Share of the snapshot that sits above the attribution band.
-    nonisolated static func visibleSnapshotFraction(mapHeight: CGFloat) -> Double {
-        guard mapHeight > 0 else { return 1 }
-        return Double(mapHeight / (mapHeight + attributionStripHeight))
-    }
-
-    /// Extends the rect southward to cover the attribution band. The
-    /// north-west corner and the metres-per-pixel scale stay put, so
-    /// `snapshot.point(for:)` remains valid for everything drawn on top.
-    nonisolated private static func attributionPaddedRect(_ rect: MKMapRect,
-                                                          mapHeight: CGFloat) -> MKMapRect {
-        guard mapHeight > 0 else { return rect }
-        let scale = (mapHeight + attributionStripHeight) / mapHeight
-        return MKMapRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height * scale)
-    }
-
-    private static func snapshotOptions(mapRect: MKMapRect,
-                                        size: CGSize,
-                                        detail: NavigationDisplayDetail) -> MKMapSnapshotter.Options {
-        let options = MKMapSnapshotter.Options()
-        options.size = size
-        options.scale = 1
-        options.mapRect = mapRect
-
-        // Flat + muted keeps the tiles to street geometry and labels. Building
-        // footprints and points of interest add nothing on a one-bit display
-        // and swamp the streets once the image is thresholded.
-        let configuration = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
-        configuration.pointOfInterestFilter = .excludingAll
-        configuration.showsTraffic = false
-        options.preferredConfiguration = configuration
-        options.showsBuildings = false
-        options.pointOfInterestFilter = .excludingAll
-        options.traitCollection = UITraitCollection(userInterfaceStyle: .dark)
-        return options
+        return RenderedScene(image: image, frame: frame)
     }
 
     // MARK: - Drawing
 
-    private func renderImage(scene: NavigationMapScene,
-                             snapshot: MKMapSnapshotter.Snapshot?) -> UIImage {
+    private func renderImage(scene: NavigationMapScene) -> UIImage {
         let size = CGSize(
             width: G1NavigationBitmapLayout.canvasWidth,
             height: G1NavigationBitmapLayout.canvasHeight
@@ -310,23 +137,6 @@ actor NavigationBitmapRenderer {
             snapDistanceMeters: 75
         )
 
-        // #region agent log
-        let visibleRect = Self.mapRect(for: scene, canvasSize: layout.map.size)
-        let metersPerPoint = 1 / MKMapPointsPerMeterAtLatitude(scene.userCoordinate.latitude)
-        let pointsPerPixel = visibleRect.height / max(1, layout.map.height)
-        let expectedUserY = (MKMapPoint(displayUser).y - visibleRect.minY) / pointsPerPixel
-        agentLog("H13,H14", "map window", [
-            "detail": scene.detailLevel.rawValue,
-            "spanEastWestMeters": Int(visibleRect.width * metersPerPoint),
-            "spanNorthSouthMeters": Int(visibleRect.height * metersPerPoint),
-            "windowPoints": window.count,
-            "hasSnapshot": snapshot != nil,
-            "snapshotPixelHeight": snapshot?.image.cgImage?.height ?? -1,
-            "expectedUserY": Int(expectedUserY.rounded()),
-            "snapshotUserY": snapshot.map { Int($0.point(for: displayUser).y.rounded()) } ?? -1
-        ])
-        // #endregion
-
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1
         format.opaque = true
@@ -336,21 +146,8 @@ actor NavigationBitmapRenderer {
             UIColor.black.setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
 
-            if let snapshot,
-               let streets = Self.binarizedStreetLayer(
-                   from: snapshot,
-                   maximumInk: scene.detailLevel.maximumStreetInk,
-                   visibleFraction: Self.visibleSnapshotFraction(mapHeight: layout.map.height)
-               ) {
-                ctx.saveGState()
-                ctx.clip(to: layout.map)
-                UIImage(cgImage: streets).draw(in: layout.map)
-                ctx.restoreGState()
-            }
-
             let projector = Self.projector(
                 layout: layout,
-                snapshot: snapshot,
                 coordinates: window + [displayUser]
             )
 
@@ -532,32 +329,8 @@ actor NavigationBitmapRenderer {
         return decimate(scene.routeCoordinates, maxPoints: 140)
     }
 
-    private static func mapRect(for scene: NavigationMapScene, canvasSize: CGSize) -> MKMapRect {
-        let window = routeWindow(for: scene)
-        let displayUser = displayUserCoordinate(
-            scene.userCoordinate,
-            route: window,
-            snapDistanceMeters: 75
-        )
-        return mapRect(
-            coordinates: [displayUser] + window,
-            canvasSize: canvasSize,
-            spanMeters: scene.detailLevel.mapSpanMeters,
-            anchor: displayUser
-        )
-    }
-
     private static func projector(layout: Layout,
-                                  snapshot: MKMapSnapshotter.Snapshot?,
                                   coordinates: [CLLocationCoordinate2D]) -> (CLLocationCoordinate2D) -> CGPoint {
-        if let snapshot {
-            let origin = layout.map.origin
-            return { coordinate in
-                let point = snapshot.point(for: coordinate)
-                return CGPoint(x: point.x + origin.x, y: point.y + origin.y)
-            }
-        }
-
         guard let bounds = coordinateBounds(for: coordinates) else {
             let center = CGPoint(x: layout.map.midX, y: layout.map.midY)
             return { _ in center }
@@ -566,74 +339,6 @@ actor NavigationBitmapRenderer {
         return { coordinate in
             project(coordinate: coordinate, bounds: bounds, into: rect, padding: 10)
         }
-    }
-
-    // MARK: - Monochrome conversion
-
-    /// Reduces MapKit tiles to a street wireframe: road surfaces and their
-    /// labels stay lit, the land and blocks around them go dark.
-    nonisolated static func binarizedStreetLayer(from snapshot: MKMapSnapshotter.Snapshot,
-                                                 maximumInk: Double,
-                                                 visibleFraction: Double) -> CGImage? {
-        guard var source = snapshot.image.cgImage else {
-            return nil
-        }
-
-        // Drop the attribution band before measuring, so the logo neither
-        // reaches the display nor skews the threshold histogram. The fraction
-        // keeps this correct whatever pixel scale MapKit hands back.
-        let visibleRows = Int((Double(source.height) * visibleFraction).rounded())
-        if visibleRows > 0, visibleRows < source.height,
-           let cropped = source.cropping(to: CGRect(
-               x: 0,
-               y: 0,
-               width: source.width,
-               height: visibleRows
-           )) {
-            source = cropped
-        }
-
-        let width = source.width
-        let height = source.height
-        guard width > 0, height > 0 else {
-            return nil
-        }
-
-        let pixelCount = width * height
-        let pixels = UnsafeMutablePointer<UInt8>.allocate(capacity: pixelCount)
-        defer { pixels.deallocate() }
-        pixels.initialize(repeating: 0, count: pixelCount)
-
-        guard let context = CGContext(
-            data: pixels,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else {
-            return nil
-        }
-        context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        var histogram = [Int](repeating: 0, count: 256)
-        for index in 0..<pixelCount {
-            histogram[Int(pixels[index])] += 1
-        }
-        guard let threshold = G1NavigationBitmapLayout.streetMaskThreshold(
-            histogram: histogram,
-            maximumInkRatio: maximumInk
-        ) else {
-            return nil
-        }
-
-        for index in 0..<pixelCount {
-            pixels[index] = pixels[index] > threshold ? 255 : 0
-        }
-
-        // `makeImage` copies the bitmap, so the buffer can be released here.
-        return context.makeImage()
     }
 
     nonisolated private static func packMonochromeBits(from image: CGImage) -> Data? {
@@ -803,70 +508,6 @@ actor NavigationBitmapRenderer {
         }
 
         return nearestPoint.coordinate
-    }
-
-    /// Fits `coordinates` on the letterbox map surface, then clamps the zoom so
-    /// head level keeps a walkable neighbourhood on screen instead of following
-    /// the aspect ratio out to a mile of cross streets.
-    nonisolated private static func mapRect(coordinates: [CLLocationCoordinate2D],
-                                            canvasSize: CGSize,
-                                            spanMeters: ClosedRange<CLLocationDistance>,
-                                            anchor: CLLocationCoordinate2D) -> MKMapRect {
-        let validCoordinates = coordinates.filter(CLLocationCoordinate2DIsValid)
-        let centerCoordinate = validCoordinates.first ?? CLLocationCoordinate2D(latitude: 0, longitude: 0)
-        var bounds = validCoordinates.reduce(MKMapRect.null) { partial, coordinate in
-            partial.union(MKMapRect(origin: MKMapPoint(coordinate), size: MKMapSize(width: 0, height: 0)))
-        }
-
-        if bounds.isNull {
-            bounds = MKMapRect(origin: MKMapPoint(centerCoordinate), size: .init(width: 1, height: 1))
-        }
-
-        let pointsPerMeter = MKMapPointsPerMeterAtLatitude(centerCoordinate.latitude)
-        let aspectRatio = max(1, canvasSize.width / canvasSize.height)
-
-        // Widest span that still shows the whole window on both axes, with a
-        // little breathing room around it.
-        let padding = 1.15
-        let fitted = max(bounds.width, bounds.height * aspectRatio) * padding
-        let width = min(
-            max(fitted, spanMeters.lowerBound * pointsPerMeter),
-            spanMeters.upperBound * pointsPerMeter
-        )
-        let height = width / aspectRatio
-
-        // Centring purely on the route window drops the user off the frame
-        // whenever the window is larger than the clamped span. Keep the window
-        // centred, but never further than this inset from the user's marker.
-        let anchorPoint = MKMapPoint(anchor)
-        let reachX = max(0, width / 2 - width * 0.18)
-        let reachY = max(0, height / 2 - height * 0.18)
-        let centerX = min(max(bounds.midX, anchorPoint.x - reachX), anchorPoint.x + reachX)
-        let centerY = min(max(bounds.midY, anchorPoint.y - reachY), anchorPoint.y + reachY)
-
-        return MKMapRect(
-            x: centerX - width / 2,
-            y: centerY - height / 2,
-            width: width,
-            height: height
-        )
-    }
-
-    nonisolated private static func snapshotCacheKey(mapRect: MKMapRect,
-                                                     detail: NavigationDisplayDetail,
-                                                     size: CGSize) -> String {
-        // Quantization allows several guidance refreshes to reuse the same map
-        // tiles while route/text overlays continue updating independently.
-        let quantum = max(1, mapRect.height / 8)
-        return [
-            detail.rawValue,
-            String(Int(size.width)),
-            String(Int(size.height)),
-            String(Int((mapRect.midX / quantum).rounded())),
-            String(Int((mapRect.midY / quantum).rounded())),
-            String(Int((mapRect.width / quantum).rounded())),
-            String(Int((mapRect.height / quantum).rounded()))
-        ].joined(separator: "|")
     }
 
     nonisolated private static func project(coordinate: CLLocationCoordinate2D,

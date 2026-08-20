@@ -1,5 +1,7 @@
 import Foundation
 import os.log
+
+#if canImport(DatadogCore) && canImport(DatadogRUM)
 import DatadogCore
 import DatadogCrashReporting
 import DatadogLogs
@@ -227,3 +229,53 @@ private extension TelemetryVitalsUpdateFrequency {
         }
     }
 }
+#else
+/// No-op telemetry facade for host-platform package tests. Datadog's mobile RUM
+/// product imports UIKit and is linked only into iOS builds.
+public final class DatadogTelemetryService: @unchecked Sendable {
+    public static let shared = DatadogTelemetryService()
+
+    private let lock = NSLock()
+    private var _config: DatadogConfig?
+
+    public var isInitialized: Bool { false }
+    public var config: DatadogConfig? { lock.withLock { _config } }
+
+    private init() {}
+
+    public func initialize(config: DatadogConfig = DatadogConfig()) {
+        lock.withLock {
+            _config = config
+        }
+    }
+
+    public func setUserInfo(id: String,
+                            name: String? = nil,
+                            email: String? = nil,
+                            extraInfo: [String: Encodable] = [:]) {}
+
+    public func clearUserInfo() {}
+
+    public func log(_ level: TelemetryLogLevel,
+                    _ message: String,
+                    error: Error? = nil,
+                    attributes: [String: Encodable] = [:]) {}
+
+    public func trackAction(type: TelemetryActionType,
+                            name: String,
+                            attributes: [String: Encodable] = [:]) {}
+
+    public func trackError(message: String,
+                           type: String? = nil,
+                           stack: String? = nil,
+                           attributes: [String: Encodable] = [:]) {}
+
+    public func trackFeatureFlagEvaluation(name: String, value: some Encodable) {}
+
+    public func trackTiming(name: String) {}
+
+    public func trackHardwareEvent(name: String,
+                                   state: String,
+                                   attributes: [String: Encodable] = [:]) {}
+}
+#endif

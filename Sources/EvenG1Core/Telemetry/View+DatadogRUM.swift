@@ -1,4 +1,6 @@
 import SwiftUI
+
+#if canImport(DatadogRUM)
 import DatadogRUM
 
 public extension View {
@@ -13,3 +15,12 @@ public extension View {
         trackRUMView(name: name, attributes: attributes)
     }
 }
+#else
+public extension View {
+    /// Host-platform fallback used when Datadog's UIKit-based RUM product is
+    /// unavailable.
+    func trackDatadogRUMView(name: String, attributes: [String: Encodable] = [:]) -> some View {
+        self
+    }
+}
+#endif

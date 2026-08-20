@@ -1,4 +1,6 @@
 import Foundation
+
+#if canImport(DatadogRUM)
 import DatadogRUM
 
 public extension URLSession {
@@ -41,3 +43,12 @@ public extension URLSession {
         }
     }
 }
+#else
+public extension URLSession {
+    /// Host-platform fallback used when Datadog's UIKit-based RUM product is
+    /// unavailable.
+    func dataReportingRUMResource(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await data(for: request)
+    }
+}
+#endif

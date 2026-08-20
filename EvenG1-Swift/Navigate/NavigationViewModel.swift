@@ -6,32 +6,6 @@ import SwiftUI
 import UIKit
 import EvenG1Core
 
-// #region agent log
-private let agentLogURL: URL? = FileManager.default
-    .urls(for: .documentDirectory, in: .userDomainMask).first?
-    .appendingPathComponent("debug-bf2a66.log")
-
-private func agentLog(_ hypothesisId: String, _ message: String, _ data: [String: Any]) {
-    guard let url = agentLogURL else { return }
-    let payload: [String: Any] = [
-        "sessionId": "bf2a66", "runId": "run1", "hypothesisId": hypothesisId,
-        "location": "NavigationViewModel.swift", "message": message, "data": data,
-        "timestamp": Int(Date().timeIntervalSince1970 * 1000)
-    ]
-    guard let json = try? JSONSerialization.data(withJSONObject: payload) else { return }
-    print("AGENTLOG-bf2a66 \(String(decoding: json, as: UTF8.self))")
-    var line = json
-    line.append(0x0A)
-    if let handle = try? FileHandle(forWritingTo: url) {
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: line)
-    } else {
-        try? line.write(to: url)
-    }
-}
-// #endregion
-
 @MainActor
 final class NavigationViewModel: ObservableObject {
     enum State: Equatable {
@@ -106,7 +80,6 @@ final class NavigationViewModel: ObservableObject {
 
     private let bitmapRenderer = NavigationBitmapRenderer()
     private var glassesDisplayDetail: NavigationDisplayDetail = .minimal
-    private var navigationStartedAt: Date?
     /// The firmware reports a head-down about a second after every head-up,
     /// which is faster than a bitmap upload completes. The overview therefore
     /// owns the display for this long before a head-down can dismiss it.
@@ -121,9 +94,6 @@ final class NavigationViewModel: ObservableObject {
     private var navigationBitmapGeneration: UInt64 = 0
     private var navigationMapUploadTask: Task<Void, Never>?
     private var isNavigationMapUploadInFlight = false
-    private var mapTileUpgradeTask: Task<Void, Never>?
-    private var mapTileUpgradeAttempts = 0
-    private let maximumMapTileUpgradeAttempts = 3
 
     private struct PendingNavigationMapUpload {
         let detail: NavigationDisplayDetail
@@ -308,21 +278,11 @@ final class NavigationViewModel: ObservableObject {
     }
 
     func selectSuggestion(_ suggestion: MapSearchSuggestion) async {
-        // #region agent log
-        agentLog("H11,H12", "selectSuggestion tapped", [
-            "title": suggestion.title,
-            "state": String(describing: state),
-            "suggestionCount": suggestions.count
-        ])
-        // #endregion
         do {
             state = .searching
             let mapItem = try await searchService.resolve(suggestion)
             await previewRoute(to: mapItem)
         } catch {
-            // #region agent log
-            agentLog("H7", "selectSuggestion resolve failed", ["error": String(describing: error)])
-            // #endregion
             state = .error("Could not resolve location")
         }
     }
@@ -341,13 +301,6 @@ final class NavigationViewModel: ObservableObject {
             userLocation = source
             updateSearchRegion(center: source)
             let plan = try await routePlanner.planRoute(from: source, to: destination, mode: selectedMode)
-            // #region agent log
-            agentLog("H9,H10", "previewRoute planned", [
-                "hasRoute": plan.route != nil,
-                "stepCount": plan.route?.steps.count ?? -1,
-                "destination": plan.destinationName
-            ])
-            // #endregion
 
             currentPlan = plan
             currentDestination = destination
@@ -379,12 +332,6 @@ final class NavigationViewModel: ObservableObject {
 
             DatadogTelemetryService.shared.trackTiming(name: "route_preview_ready")
         } catch {
-            // #region agent log
-            agentLog("H9,H10", "previewRoute failed", [
-                "error": String(describing: error),
-                "message": userFacingError(error)
-            ])
-            // #endregion
             state = .error(userFacingError(error))
             activeInstructionTitle = "Route unavailable"
             activeInstructionSubtitle = userFacingError(error)
@@ -407,7 +354,6 @@ final class NavigationViewModel: ObservableObject {
         activeStepIndex = 0
         previewStepIndex = nil
         latestTrackingUpdate = nil
-        navigationStartedAt = Date()
 
         // The current G1 firmware NACKs the experimental native navigation
         // command family. Waiting for those retries delayed startup and then
@@ -433,16 +379,6 @@ final class NavigationViewModel: ObservableObject {
                 initialCoordinate = try? await oneShotLocationProvider.requestOneShotLocation()
             }
 
-            // #region agent log
-            agentLog("H6", "startNavigation resolved initial coordinate", [
-                "hasCoordinate": initialCoordinate != nil,
-                "stepCount": route.steps.count,
-                "routeDistance": Int(route.distance),
-                "state": String(describing: state),
-                "connectionState": String(describing: bluetoothManager?.connectionState)
-            ])
-            // #endregion
-
             if let coordinate = initialCoordinate {
                 let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
                 userLocation = coordinate
@@ -450,13 +386,6 @@ final class NavigationViewModel: ObservableObject {
                 let generation = navigationBitmapGeneration
                 navigationSetupTask = Task { [weak self] in
                     guard let self else { return }
-                    // #region agent log
-                    agentLog("H6", "navigationSetupTask entered", [
-                        "cancelled": Task.isCancelled,
-                        "generationMatch": generation == self.navigationBitmapGeneration,
-                        "state": String(describing: self.state)
-                    ])
-                    // #endregion
                     guard !Task.isCancelled,
                           generation == self.navigationBitmapGeneration else {
                         return
@@ -494,9 +423,6 @@ final class NavigationViewModel: ObservableObject {
         navigationMapUploadTask = nil
         isNavigationMapUploadInFlight = false
         pendingNavigationMapUpload = nil
-        mapTileUpgradeTask?.cancel()
-        mapTileUpgradeTask = nil
-        mapTileUpgradeAttempts = 0
         periodicPushTask?.cancel()
         periodicPushTask = nil
         rerouteTask?.cancel()
@@ -530,28 +456,13 @@ final class NavigationViewModel: ObservableObject {
     }
 
     func saveFavorite(kind: NavigationFavoriteKind) async {
-        // #region agent log
-        agentLog("H11,H7", "saveFavorite tapped", [
-            "kind": String(describing: kind),
-            "hasCurrentDestination": currentDestination != nil,
-            "suggestionCount": suggestions.count,
-            "query": searchQuery,
-            "state": String(describing: state)
-        ])
-        // #endregion
         guard kind == .home || kind == .office else { return }
 
         do {
             let mapItem = try await resolveMapItemForSaving()
             favoritesStore.setFavorite(kind: kind, mapItem: mapItem)
             favoriteActionMessage = "\(kind == .home ? "Home" : "Office") saved"
-            // #region agent log
-            agentLog("H11", "saveFavorite stored", ["name": mapItem.name ?? "<unnamed>"])
-            // #endregion
         } catch {
-            // #region agent log
-            agentLog("H7", "saveFavorite failed", ["error": String(describing: error)])
-            // #endregion
             favoriteActionMessage = "Search for a place first, then save it"
         }
     }
@@ -584,22 +495,6 @@ final class NavigationViewModel: ObservableObject {
         }
 
         let mappedAction = G1NavigationGestureMapper.action(for: event, isNavigationActive: isNavigationActive)
-        // #region agent log
-        var rawPayload = "<mapped>"
-        if case .unknown(let command, let firstByte, let payload) = event {
-            rawPayload = String(format: "cmd=%02X code=%02X ", command, firstByte ?? 0)
-                + payload.map { String(format: "%02X", $0) }.joined(separator: " ")
-        }
-        agentLog("H17,H18,H23", "glasses event", [
-            "event": String(describing: event),
-            "raw": rawPayload,
-            "isNavigationActive": isNavigationActive,
-            "action": mappedAction.map { String(describing: $0) } ?? "<none>",
-            "debounced": mappedAction.map { isGestureWithinDebounce($0) } ?? false,
-            "currentDetail": glassesDisplayDetail.rawValue,
-            "dashboardVisible": bluetoothManager?.isDashboardVisible ?? false
-        ])
-        // #endregion
 
         guard let action = mappedAction, shouldHandleGesture(action) else {
             return
@@ -651,12 +546,6 @@ final class NavigationViewModel: ObservableObject {
 
         case .hideOverlay:
             if let overviewHoldUntil, Date() < overviewHoldUntil {
-                // #region agent log
-                agentLog("H22", "head-down ignored during overview hold", [
-                    "remainingSeconds": overviewHoldUntil.timeIntervalSinceNow,
-                    "currentDetail": glassesDisplayDetail.rawValue
-                ])
-                // #endregion
                 return
             }
             await returnToHeadLevelView()
@@ -666,12 +555,6 @@ final class NavigationViewModel: ObservableObject {
     // MARK: - Internal Updates
 
     private func enqueueLocationUpdate(_ location: CLLocation) async {
-        // #region agent log
-        agentLog("H32", "location enqueued", [
-            "coalescedAway": isProcessingLocationUpdate,
-            "state": String(describing: state)
-        ])
-        // #endregion
         pendingLocationUpdate = location
         guard !isProcessingLocationUpdate else { return }
 
@@ -709,16 +592,6 @@ final class NavigationViewModel: ObservableObject {
         )
         latestTrackingUpdate = update
         userLocation = location.coordinate
-
-        // #region agent log
-        agentLog("H1", "location update evaluated", [
-            "arrived": update.arrived,
-            "remainingDistanceMeters": update.remainingDistanceMeters,
-            "distanceToManeuverMeters": update.distanceToManeuverMeters,
-            "nearestStepIndex": update.nearestStepIndex,
-            "state": String(describing: state)
-        ])
-        // #endregion
 
         if isFollowingUser, isNavigateTabActive, isAppActive {
             applyCamera(to: location.coordinate, latLonDelta: Self.navigationFollowLatLonDelta)
@@ -986,15 +859,13 @@ final class NavigationViewModel: ObservableObject {
     private func setGlassesDisplayDetail(_ detail: NavigationDisplayDetail) async {
         guard glassesDisplayDetail != detail else {
             // A repeated head gesture should recover the requested view if a
-            // previous snapshot/upload was interrupted.
+            // previous render or upload was interrupted.
             await refreshNavigationBitmap(forceUpload: true)
             return
         }
 
         glassesDisplayDetail = detail
         glassesDisplayDetailLabel = detail == .detailed ? "Full map" : "Minimal path"
-        mapTileUpgradeAttempts = 0
-        mapTileUpgradeTask?.cancel()
 
         let location: CLLocation
         if let tracked = latestTrackingUpdate?.location {
@@ -1070,18 +941,6 @@ final class NavigationViewModel: ObservableObject {
         let stepChanged = pending.stepChanged
         let forceUpload = pending.forceUpload
 
-        // #region agent log
-        agentLog("H1,H2,H4", "performNavigationMapUpload entry", [
-            "detail": detail.rawValue,
-            "forceUpload": forceUpload,
-            "stepChanged": stepChanged,
-            "state": String(describing: state),
-            "isAppActive": isAppActive,
-            "connectionState": String(describing: bluetoothManager?.connectionState),
-            "hasRoute": currentPlan?.route != nil
-        ])
-        // #endregion
-
         guard isAppActive, state == .navigating || state == .rerouting else {
             return
         }
@@ -1094,12 +953,6 @@ final class NavigationViewModel: ObservableObject {
                 if !stepChanged,
                    let lastMinimalBitmapAt,
                    now.timeIntervalSince(lastMinimalBitmapAt) < minimalBitmapInterval {
-                    // #region agent log
-                    agentLog("H30", "refresh skipped by interval", [
-                        "detail": detail.rawValue,
-                        "secondsSinceLastUpload": now.timeIntervalSince(lastMinimalBitmapAt)
-                    ])
-                    // #endregion
                     return
                 }
             case .detailed:
@@ -1112,41 +965,14 @@ final class NavigationViewModel: ObservableObject {
 
         let builtScene = buildNavigationMapScene(detail: detail, userLocation: userLocation)
         guard let scene = builtScene else {
-            // #region agent log
-            agentLog("H2", "scene build returned nil", ["hasRoute": currentPlan?.route != nil])
-            // #endregion
             return
         }
 
         if !forceUpload, lastUploadedBitmapSignature == scene.uploadSignature {
-            // #region agent log
-            agentLog("H30", "refresh skipped, identical signature", [
-                "detail": detail.rawValue,
-                "signature": scene.uploadSignature,
-                "secondsSinceLastUpload": lastMinimalBitmapAt.map { now.timeIntervalSince($0) } ?? -1
-            ])
-            // #endregion
             return
         }
 
-        // Forced updates (startup, head gestures, step changes) must reach the
-        // glasses immediately, so they only wait briefly for map tiles and fall
-        // back to plain route geometry. A follow-up pass below swaps in the
-        // street map once the snapshot lands.
-        let rendered = try? await bitmapRenderer.render(
-            scene: scene,
-            snapshotTimeout: forceUpload ? .milliseconds(900) : .seconds(4)
-        )
-
-        // #region agent log
-        agentLog("H2,H3", "render finished", [
-            "renderedNil": rendered == nil,
-            "usedMapTiles": rendered?.usedMapTiles ?? false,
-            "routeCoordinateCount": scene.routeCoordinates.count,
-            "generationMatch": generation == navigationBitmapGeneration,
-            "state": String(describing: state)
-        ])
-        // #endregion
+        let rendered = try? await bitmapRenderer.render(scene: scene)
 
         guard let rendered else {
             return
@@ -1167,53 +993,15 @@ final class NavigationViewModel: ObservableObject {
             lastDetailedBitmapAt = now
         }
 
-        let connectionAtUpload = String(describing: bluetoothManager?.connectionState)
         guard bluetoothManager?.connectionState == .fullyConnected else {
-            // #region agent log
-            agentLog("H4", "upload skipped, not fully connected", ["connectionState": connectionAtUpload])
-            // #endregion
             return
         }
 
         let sent = await uploadNavigationBitmap(rendered.frame, detail: detail)
-        // #region agent log
-        agentLog("H4,H5,H24", "bitmap upload result", [
-            "sent": sent,
-            "detail": detail.rawValue,
-            "connectionState": connectionAtUpload,
-            "msSinceNavigationStart": navigationStartedAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
-        ])
-        // #endregion
         if !sent {
             lastUploadedBitmapSignature = nil
         }
 
-        if rendered.usedMapTiles {
-            mapTileUpgradeAttempts = 0
-        } else if sent {
-            scheduleMapTileUpgrade(for: detail)
-        }
-    }
-
-    /// Re-renders shortly after a tile-less frame so the street map replaces the
-    /// bare route once MapKit finishes the snapshot.
-    private func scheduleMapTileUpgrade(for detail: NavigationDisplayDetail) {
-        guard mapTileUpgradeAttempts < maximumMapTileUpgradeAttempts else {
-            return
-        }
-        mapTileUpgradeAttempts += 1
-
-        let generation = navigationBitmapGeneration
-        mapTileUpgradeTask?.cancel()
-        mapTileUpgradeTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(1_200))
-            guard let self, !Task.isCancelled else { return }
-            guard generation == self.navigationBitmapGeneration,
-                  self.glassesDisplayDetail == detail else {
-                return
-            }
-            await self.refreshNavigationBitmap(forceUpload: true)
-        }
     }
 
     @discardableResult
@@ -1452,15 +1240,6 @@ final class NavigationViewModel: ObservableObject {
             setCameraPosition(.region(region))
         }
     }
-
-    // #region agent log
-    /// Read-only view of the debounce window, so instrumentation can report a
-    /// dropped gesture without consuming it.
-    private func isGestureWithinDebounce(_ action: G1NavigationGestureAction) -> Bool {
-        guard let lastFired = gestureLastFiredAt[action] else { return false }
-        return Date().timeIntervalSince(lastFired) < gestureDebounceSeconds
-    }
-    // #endregion
 
     private func shouldHandleGesture(_ action: G1NavigationGestureAction) -> Bool {
         let now = Date()

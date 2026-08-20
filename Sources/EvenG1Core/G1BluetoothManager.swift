@@ -6,30 +6,6 @@ import os.log
 /// Logger for G1 Bluetooth operations
 private let logger = Logger(subsystem: "com.eveng1", category: "Bluetooth")
 
-// #region agent log
-nonisolated private func agentLog(_ hypothesisId: String, _ message: String, _ data: [String: Any]) {
-    let payload: [String: Any] = [
-        "sessionId": "bf2a66", "runId": "frames", "hypothesisId": hypothesisId,
-        "location": "G1BluetoothManager.swift", "message": message, "data": data,
-        "timestamp": Int(Date().timeIntervalSince1970 * 1000)
-    ]
-    guard let json = try? JSONSerialization.data(withJSONObject: payload),
-          let url = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("debug-bf2a66.log") else { return }
-    print("AGENTLOG-bf2a66 \(String(decoding: json, as: UTF8.self))")
-    var line = json
-    line.append(0x0A)
-    if let handle = try? FileHandle(forWritingTo: url) {
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: line)
-    } else {
-        try? line.write(to: url)
-    }
-}
-// #endregion
-
 /// FIFO async gate used on the main actor to prevent command-state races across
 /// suspension points. A resumed waiter owns the gate until it releases it.
 @MainActor
@@ -2202,28 +2178,6 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         
         // Parse event
         if let event = frameParser.parseEvent(from: frame) {
-            // #region agent log
-            switch event {
-            case .singleTap, .doubleTap, .tripleTap, .swipeForward, .swipeBackward,
-                 .pressAndHold, .pressAndRelease, .headUp, .headDown:
-                agentLog("H28", "gesture event source frame", [
-                    "event": event.displayString,
-                    "side": side.rawValue,
-                    "commandByte": String(format: "%02X", frame.commandByte),
-                    "frameHex": frame.hexString
-                ])
-            case .unknown(let command, _, _) where command == G1Command.STATUS.rawValue
-                || command == G1Command.DEVICE_EVENT.rawValue
-                || command == G1CompatibilityCommand.headUpMode:
-                agentLog("H29", "unmapped control frame", [
-                    "side": side.rawValue,
-                    "commandByte": String(format: "%02X", frame.commandByte),
-                    "frameHex": frame.hexString
-                ])
-            default:
-                break
-            }
-            // #endregion
             addEvent(event)
             log("Event [\(side.rawValue)]: \(event.displayString)", level: .info)
             

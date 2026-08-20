@@ -2,30 +2,6 @@ import CoreLocation
 import Foundation
 import MapKit
 
-// #region agent log
-nonisolated private func agentLog(_ hypothesisId: String, _ message: String, _ data: [String: Any]) {
-    let payload: [String: Any] = [
-        "sessionId": "bf2a66", "runId": "location", "hypothesisId": hypothesisId,
-        "location": "RouteTracker.swift", "message": message, "data": data,
-        "timestamp": Int(Date().timeIntervalSince1970 * 1000)
-    ]
-    guard let json = try? JSONSerialization.data(withJSONObject: payload),
-          let url = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("debug-bf2a66.log") else { return }
-    print("AGENTLOG-bf2a66 \(String(decoding: json, as: UTF8.self))")
-    var line = json
-    line.append(0x0A)
-    if let handle = try? FileHandle(forWritingTo: url) {
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: line)
-    } else {
-        try? line.write(to: url)
-    }
-}
-// #endregion
-
 struct RouteTrackingUpdate {
     let location: CLLocation
     let nearestStepIndex: Int
@@ -54,15 +30,6 @@ final class RouteTracker: NSObject, CLLocationManagerDelegate {
     func start(onLocationUpdate: @escaping (CLLocation) -> Void) {
         self.onLocationUpdate = onLocationUpdate
         isTracking = true
-
-        // #region agent log
-        agentLog("H32", "route tracker start", [
-            "authorization": manager.authorizationStatus.rawValue,
-            "distanceFilter": manager.distanceFilter,
-            "pausesAutomatically": manager.pausesLocationUpdatesAutomatically,
-            "allowsBackground": manager.allowsBackgroundLocationUpdates
-        ])
-        // #endregion
 
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
@@ -99,15 +66,6 @@ final class RouteTracker: NSObject, CLLocationManagerDelegate {
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        // #region agent log
-        agentLog("H32", "core location callback", [
-            "count": locations.count,
-            "isTracking": isTracking,
-            "accuracy": locations.last?.horizontalAccuracy ?? -1,
-            "speed": locations.last?.speed ?? -1,
-            "ageSeconds": locations.last.map { abs($0.timestamp.timeIntervalSinceNow) } ?? -1
-        ])
-        // #endregion
         guard isTracking else { return }
 
         let freshnessThreshold: TimeInterval = 30
@@ -115,29 +73,10 @@ final class RouteTracker: NSObject, CLLocationManagerDelegate {
             $0.horizontalAccuracy >= 0
                 && abs($0.timestamp.timeIntervalSinceNow) <= freshnessThreshold
         }) else {
-            // #region agent log
-            agentLog("H32", "core location callback rejected as stale", [
-                "count": locations.count
-            ])
-            // #endregion
             return
         }
         onLocationUpdate?(latest)
     }
-
-    // #region agent log
-    func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
-        agentLog("H32", "core location paused updates", ["isTracking": isTracking])
-    }
-
-    func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
-        agentLog("H32", "core location resumed updates", ["isTracking": isTracking])
-    }
-
-    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        agentLog("H32", "core location failed", ["error": String(describing: error)])
-    }
-    // #endregion
 
     static func evaluate(location: CLLocation,
                          route: MKRoute,
