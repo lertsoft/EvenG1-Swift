@@ -7,6 +7,9 @@ import DatadogCrashReporting
 import DatadogLogs
 import DatadogRUM
 import DatadogInternal
+#if canImport(DatadogFlags)
+import DatadogFlags
+#endif
 
 /// Central service managing Datadog Core, RUM, Logs, and crash reporting initialization and telemetry reporting.
 public final class DatadogTelemetryService: @unchecked Sendable {
@@ -19,6 +22,9 @@ public final class DatadogTelemetryService: @unchecked Sendable {
     private var _setupStarted = false
     private var _config: DatadogConfig?
     private var _logger: DatadogLogs.LoggerProtocol?
+#if canImport(DatadogFlags)
+    private var _flagsClient: (any FlagsClientProtocol)?
+#endif
 
     /// SDK lifecycle messages go to unified logging: they describe whether remote
     /// telemetry is available, so they cannot depend on it.
@@ -26,6 +32,10 @@ public final class DatadogTelemetryService: @unchecked Sendable {
 
     public var isInitialized: Bool { lock.withLock { _isInitialized } }
     public var config: DatadogConfig? { lock.withLock { _config } }
+#if canImport(DatadogFlags)
+    /// Remote feature-flag client, available after `initialize(config:)` when flags are enabled.
+    public var flagsClient: (any FlagsClientProtocol)? { lock.withLock { _flagsClient } }
+#endif
 
     private init() {}
 
@@ -86,6 +96,12 @@ public final class DatadogTelemetryService: @unchecked Sendable {
         )
         RUM.enable(with: rumConfig)
 
+#if canImport(DatadogFlags)
+        if config.featureFlagsEnabled {
+            configureFeatureFlags(config: config)
+        }
+#endif
+
         Logs.enable()
         let logger = DatadogLogs.Logger.create(
             with: DatadogLogs.Logger.Configuration(
@@ -112,6 +128,34 @@ public final class DatadogTelemetryService: @unchecked Sendable {
         diagnostics.notice("Successfully initialized Datadog (RUM + Logs + crash/hang reporting).")
         log(.notice, "Datadog telemetry initialized", attributes: ["component": "telemetry"])
     }
+
+#if canImport(DatadogFlags)
+    private func configureFeatureFlags(config: DatadogConfig) {
+        var flagsConfig = Flags.Configuration()
+        Flags.enable(with: flagsConfig)
+        FlagsClient.create()
+        let client = FlagsClient.shared()
+        lock.withLock { _flagsClient = client }
+
+        let evaluationContext = FlagsEvaluationContext(
+            targetingKey: TelemetryIdentity.anonymousInstallID(),
+            attributes: [
+                "app.version": .string(TelemetryBuildInfo.marketingVersion),
+                "app.build": .string(TelemetryBuildInfo.buildNumber),
+                "env": .string(config.environment)
+            ]
+        )
+
+        Task {
+            do {
+                try await client.setEvaluationContext(evaluationContext)
+                diagnostics.notice("Feature flags evaluation context set.")
+            } catch {
+                diagnostics.error("Failed to set feature flags context: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+#endif
 
     /// Set user identity and attributes for session correlation in RUM and logs.
     public func setUserInfo(id: String, name: String? = nil, email: String? = nil, extraInfo: [String: Encodable] = [:]) {

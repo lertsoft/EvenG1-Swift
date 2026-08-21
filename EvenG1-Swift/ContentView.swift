@@ -18,6 +18,9 @@ struct ContentView: View {
 
     @State private var selectedTab = 0
     @State private var transitCatalogSubtitle = "Next trains at your station"
+    @State private var deviceTabEnabled = true
+    @State private var navigateTabEnabled = true
+    @State private var headsUpTabEnabled = true
 
     private var rumViewAttributes: [String: String] {
         var attributes = TelemetryBuildInfo.rumViewAttributes
@@ -62,33 +65,65 @@ struct ContentView: View {
 
     private var tabs: some View {
         TabView(selection: $selectedTab) {
-            DeviceTab()
-                .trackDatadogRUMView(name: "DeviceTab", attributes: rumViewAttributes)
-                .tabItem {
-                    Label("Device", systemImage: "eyeglasses")
-                }
-                .tag(0)
+            if deviceTabEnabled {
+                DeviceTab()
+                    .trackDatadogRUMView(name: "DeviceTab", attributes: rumViewAttributes)
+                    .tabItem {
+                        Label("Device", systemImage: "eyeglasses")
+                    }
+                    .tag(0)
+            }
 
-            NavigateTab(isActive: selectedTab == 1)
-                .trackDatadogRUMView(name: "NavigateTab", attributes: rumViewAttributes)
-                .tabItem {
-                    Label("Navigate", systemImage: "map")
-                }
-                .tag(1)
+            if navigateTabEnabled {
+                NavigateTab(isActive: selectedTab == 1)
+                    .trackDatadogRUMView(name: "NavigateTab", attributes: rumViewAttributes)
+                    .tabItem {
+                        Label("Navigate", systemImage: "map")
+                    }
+                    .tag(1)
+            }
 
-            AppsTab(
-                transitSubtitle: transitCatalogSubtitle,
-                transitViewModel: transitViewModel
-            )
-                .trackDatadogRUMView(name: "AppsTab", attributes: rumViewAttributes)
-                .tabItem {
-                    Label("Heads-Up", systemImage: "square.stack.3d.up")
-                }
-                .tag(2)
+            if headsUpTabEnabled {
+                AppsTab(
+                    transitSubtitle: transitCatalogSubtitle,
+                    transitViewModel: transitViewModel
+                )
+                    .trackDatadogRUMView(name: "AppsTab", attributes: rumViewAttributes)
+                    .tabItem {
+                        Label("Heads-Up", systemImage: "square.stack.3d.up")
+                    }
+                    .tag(2)
+            }
+        }
+    }
+
+    private func loadFeatureFlags() {
+        deviceTabEnabled = FeatureFlagManager.shared.boolValue(
+            forKey: EvenG1FeatureFlagKey.deviceTabEnabled,
+            defaultValue: true
+        )
+        navigateTabEnabled = FeatureFlagManager.shared.boolValue(
+            forKey: EvenG1FeatureFlagKey.navigateTabEnabled,
+            defaultValue: true
+        )
+        headsUpTabEnabled = FeatureFlagManager.shared.boolValue(
+            forKey: EvenG1FeatureFlagKey.headsUpTabEnabled,
+            defaultValue: true
+        )
+
+        let enabledTabs = [
+            deviceTabEnabled ? 0 : nil,
+            navigateTabEnabled ? 1 : nil,
+            headsUpTabEnabled ? 2 : nil
+        ].compactMap { $0 }
+
+        if !enabledTabs.contains(selectedTab), let firstEnabledTab = enabledTabs.first {
+            selectedTab = firstEnabledTab
         }
     }
 
     private func handleAppear() {
+        loadFeatureFlags()
         transitViewModel.bind(bluetoothManager: bluetoothManager)
         voiceCoordinator.bind(to: bluetoothManager)
         notificationMirror.bind(bluetoothManager: bluetoothManager)

@@ -35,6 +35,8 @@ public struct DatadogConfig: Sendable {
     public var trackingConsent: Consent
     public var logsSampleRate: Float
     public var logsRemoteThreshold: TelemetryLogLevel
+    /// When true, enables the Datadog Feature Flags client after RUM initialization.
+    public var featureFlagsEnabled: Bool
 
     public init(
         clientToken: String = DatadogConfig.infoPlistValue(for: "DATADOG_CLIENT_TOKEN") ?? "",
@@ -53,7 +55,8 @@ public struct DatadogConfig: Sendable {
         vitalsUpdateFrequency: TelemetryVitalsUpdateFrequency = .frequent,
         trackingConsent: Consent = .granted,
         logsSampleRate: Float = 100.0,
-        logsRemoteThreshold: TelemetryLogLevel = .debug
+        logsRemoteThreshold: TelemetryLogLevel = .debug,
+        featureFlagsEnabled: Bool = true
     ) {
         self.clientToken = clientToken
         self.applicationID = applicationID
@@ -72,6 +75,7 @@ public struct DatadogConfig: Sendable {
         self.trackingConsent = trackingConsent
         self.logsSampleRate = logsSampleRate
         self.logsRemoteThreshold = logsRemoteThreshold
+        self.featureFlagsEnabled = featureFlagsEnabled
     }
 
     /// Reads a build-time Info.plist string, treating blanks and unexpanded

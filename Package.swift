@@ -35,7 +35,8 @@ let package = Package(
                 .product(name: "DatadogCore", package: "dd-sdk-ios", condition: .when(platforms: [.iOS])),
                 .product(name: "DatadogRUM", package: "dd-sdk-ios", condition: .when(platforms: [.iOS])),
                 .product(name: "DatadogLogs", package: "dd-sdk-ios", condition: .when(platforms: [.iOS])),
-                .product(name: "DatadogCrashReporting", package: "dd-sdk-ios", condition: .when(platforms: [.iOS]))
+                .product(name: "DatadogCrashReporting", package: "dd-sdk-ios", condition: .when(platforms: [.iOS])),
+                .product(name: "DatadogFlags", package: "dd-sdk-ios", condition: .when(platforms: [.iOS]))
             ],
             path: "Sources/EvenG1Core"
         ),

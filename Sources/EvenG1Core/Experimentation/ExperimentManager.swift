@@ -35,10 +35,15 @@ public final class ExperimentManager: @unchecked Sendable {
     /// - Returns: Assigned experiment variant string (e.g. "control", "variant_b").
     @discardableResult
     public func evaluateExperiment(experimentKey: String, defaultVariant: String = "control") -> String {
-        // Resolved rather than evaluated through `FeatureFlagManager`, which would
-        // report the exposure a second time under the same flag name.
-        let assignedVariant = lock.withLock { mockAssignments[experimentKey] }
-            ?? FeatureFlagManager.shared.resolve(key: experimentKey, defaultValue: defaultVariant)
+        let assignedVariant: String
+        if let mockVariant = lock.withLock({ mockAssignments[experimentKey] }) {
+            assignedVariant = mockVariant
+            DatadogTelemetryService.shared.trackFeatureFlagEvaluation(name: experimentKey, value: assignedVariant)
+        } else {
+            // `stringValue` reports exposure via FlagsClient when remote flags are
+            // available, or manually when falling back to defaults.
+            assignedVariant = FeatureFlagManager.shared.stringValue(forKey: experimentKey, defaultValue: defaultVariant)
+        }
 
         let assignment = ExperimentAssignment(
             experimentKey: experimentKey,
@@ -46,8 +51,6 @@ public final class ExperimentManager: @unchecked Sendable {
             timestamp: Date()
         )
         lock.withLock { activeAssignments[experimentKey] = assignment }
-
-        DatadogTelemetryService.shared.trackFeatureFlagEvaluation(name: experimentKey, value: assignedVariant)
 
         DatadogTelemetryService.shared.log(
             .debug,

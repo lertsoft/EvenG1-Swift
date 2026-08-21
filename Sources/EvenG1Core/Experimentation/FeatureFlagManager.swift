@@ -1,11 +1,10 @@
 import Foundation
+#if canImport(DatadogFlags)
+import DatadogFlags
+#endif
 
-/// Evaluates feature flags locally and reports each evaluation to Datadog RUM.
-///
-/// Datadog does not deliver flag values on iOS; it records the evaluations a flag
-/// provider makes so they can be correlated with sessions, errors, and views. Until
-/// a provider is wired in, values come from `setMockFlag(key:value:)` or the
-/// caller's default.
+/// Evaluates feature flags from Datadog Feature Flags, local mocks, or caller defaults,
+/// and reports exposures to Datadog RUM when the SDK does not do so automatically.
 public final class FeatureFlagManager: @unchecked Sendable {
     public static let shared = FeatureFlagManager()
 
@@ -30,22 +29,70 @@ public final class FeatureFlagManager: @unchecked Sendable {
 
     /// Evaluate a boolean feature flag and track evaluation in Datadog RUM.
     public func boolValue(forKey key: String, defaultValue: Bool = false) -> Bool {
-        evaluate(key: key, defaultValue: defaultValue)
+        if let mockValue = mockValue(forKey: key, as: Bool.self) {
+            reportExposure(name: key, value: mockValue)
+            return mockValue
+        }
+
+        #if canImport(DatadogFlags)
+        if let client = DatadogTelemetryService.shared.flagsClient {
+            return client.getBooleanValue(key: key, defaultValue: defaultValue)
+        }
+        #endif
+
+        reportExposure(name: key, value: defaultValue)
+        return defaultValue
     }
 
     /// Evaluate a string feature flag variant and track evaluation in Datadog RUM.
     public func stringValue(forKey key: String, defaultValue: String) -> String {
-        evaluate(key: key, defaultValue: defaultValue)
+        if let mockValue = mockValue(forKey: key, as: String.self) {
+            reportExposure(name: key, value: mockValue)
+            return mockValue
+        }
+
+        #if canImport(DatadogFlags)
+        if let client = DatadogTelemetryService.shared.flagsClient {
+            return client.getStringValue(key: key, defaultValue: defaultValue)
+        }
+        #endif
+
+        reportExposure(name: key, value: defaultValue)
+        return defaultValue
     }
 
     /// Evaluate an integer feature flag and track evaluation in Datadog RUM.
     public func intValue(forKey key: String, defaultValue: Int) -> Int {
-        evaluate(key: key, defaultValue: defaultValue)
+        if let mockValue = mockValue(forKey: key, as: Int.self) {
+            reportExposure(name: key, value: mockValue)
+            return mockValue
+        }
+
+        #if canImport(DatadogFlags)
+        if let client = DatadogTelemetryService.shared.flagsClient {
+            return client.getIntegerValue(key: key, defaultValue: defaultValue)
+        }
+        #endif
+
+        reportExposure(name: key, value: defaultValue)
+        return defaultValue
     }
 
     /// Evaluate a double / floating-point feature flag and track evaluation in Datadog RUM.
     public func doubleValue(forKey key: String, defaultValue: Double) -> Double {
-        evaluate(key: key, defaultValue: defaultValue)
+        if let mockValue = mockValue(forKey: key, as: Double.self) {
+            reportExposure(name: key, value: mockValue)
+            return mockValue
+        }
+
+        #if canImport(DatadogFlags)
+        if let client = DatadogTelemetryService.shared.flagsClient {
+            return client.getDoubleValue(key: key, defaultValue: defaultValue)
+        }
+        #endif
+
+        reportExposure(name: key, value: defaultValue)
+        return defaultValue
     }
 
     /// Resolve a flag without reporting it, for callers that report the evaluation
@@ -54,10 +101,12 @@ public final class FeatureFlagManager: @unchecked Sendable {
         lock.withLock { (mockFlags[key] as? T) ?? defaultValue }
     }
 
-    private func evaluate<T: Encodable>(key: String, defaultValue: T) -> T {
-        let value = resolve(key: key, defaultValue: defaultValue)
-        DatadogTelemetryService.shared.trackFeatureFlagEvaluation(name: key, value: value)
-        return value
+    private func mockValue<T>(forKey key: String, as type: T.Type) -> T? {
+        lock.withLock { mockFlags[key] as? T }
+    }
+
+    private func reportExposure<T: Encodable>(name: String, value: T) {
+        DatadogTelemetryService.shared.trackFeatureFlagEvaluation(name: name, value: value)
     }
 }
 

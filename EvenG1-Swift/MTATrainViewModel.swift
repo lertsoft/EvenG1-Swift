@@ -53,6 +53,7 @@ final class MTATrainViewModel: ObservableObject {
     private var lastKnownUserCoordinate: CLLocationCoordinate2D?
     private var cancellables = Set<AnyCancellable>()
     private var bitmapRenderGeneration: UInt64 = 0
+    private var mtaBoardLayoutVariant = "control"
 
     private let tiltRefreshDebounceSeconds: TimeInterval = 2.0
     private let edgeRefreshCooldownSeconds: TimeInterval = 2.0
@@ -92,6 +93,10 @@ final class MTATrainViewModel: ObservableObject {
     /// gestures so the widget never fights another feature for the display.
     func activateWidget() async {
         isWidgetActive = true
+        mtaBoardLayoutVariant = ExperimentManager.shared.evaluateExperiment(
+            experimentKey: EvenG1FeatureFlagKey.mtaBoardLayoutExperiment,
+            defaultVariant: "control"
+        )
         bitmapRenderGeneration &+= 1
         updateAutoRefreshTask()
         if let bluetoothManager,
@@ -327,6 +332,15 @@ final class MTATrainViewModel: ObservableObject {
 
     private var currentPageIndex: Int = 0
 
+    private var effectiveDirectionModeForVisualBoard: MTADirectionPreferenceMode {
+        switch mtaBoardLayoutVariant {
+        case "single_summary":
+            return .uptownOnly
+        default:
+            return currentStationPreferenceMode
+        }
+    }
+
     private func rebuildVisualPages(resetToFirst: Bool) {
         guard let selectedStation else {
             currentPages = []
@@ -340,7 +354,7 @@ final class MTATrainViewModel: ObservableObject {
             userCoordinate: lastKnownUserCoordinate,
             trains: upcomingTrains,
             alerts: latestAlerts,
-            directionMode: currentStationPreferenceMode
+            directionMode: effectiveDirectionModeForVisualBoard
         )
 
         if resetToFirst || currentPageIndex >= currentPages.count {

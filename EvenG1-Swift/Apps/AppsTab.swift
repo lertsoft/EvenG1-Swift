@@ -11,6 +11,10 @@ struct AppsTab: View {
     let transitSubtitle: String
     @ObservedObject var transitViewModel: MTATrainViewModel
     @State private var path = NavigationPath()
+    @State private var transitWidgetEnabled = true
+    @State private var notificationsWidgetEnabled = true
+    @State private var translateWidgetEnabled = true
+    @State private var notesWidgetEnabled = true
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -20,51 +24,59 @@ struct AppsTab: View {
                         DisconnectedNotice()
                     }
 
-                    NavigationLink {
-                        TransitWidgetView(viewModel: transitViewModel)
-                    } label: {
-                        HUDAppCard(
-                            title: "Transit",
-                            subtitle: transitSubtitle,
-                            icon: "tram.fill",
-                            tint: .cyan
-                        )
+                    if transitWidgetEnabled {
+                        NavigationLink {
+                            TransitWidgetView(viewModel: transitViewModel)
+                        } label: {
+                            HUDAppCard(
+                                title: "Transit",
+                                subtitle: transitSubtitle,
+                                icon: "tram.fill",
+                                tint: .cyan
+                            )
+                        }
+                        .accessibilityIdentifier("apps.transitLink")
                     }
-                    .accessibilityIdentifier("apps.transitLink")
 
-                    NavigationLink {
-                        NotificationsWidgetView()
-                    } label: {
-                        HUDAppCard(
-                            title: "Notifications",
-                            subtitle: "Envelope on the lens, tilt up to read",
-                            icon: "bell.badge.fill",
-                            tint: .orange
-                        )
+                    if notificationsWidgetEnabled {
+                        NavigationLink {
+                            NotificationsWidgetView()
+                        } label: {
+                            HUDAppCard(
+                                title: "Notifications",
+                                subtitle: "Envelope on the lens, tilt up to read",
+                                icon: "bell.badge.fill",
+                                tint: .orange
+                            )
+                        }
+                        .accessibilityIdentifier("apps.notificationsLink")
                     }
-                    .accessibilityIdentifier("apps.notificationsLink")
 
-                    NavigationLink(value: HeadsUpDestination.translate) {
-                        HUDAppCard(
-                            title: "Translate",
-                            subtitle: "Live translated captions from the glasses mic",
-                            icon: "translate",
-                            tint: .green
-                        )
+                    if translateWidgetEnabled {
+                        NavigationLink(value: HeadsUpDestination.translate) {
+                            HUDAppCard(
+                                title: "Translate",
+                                subtitle: "Live translated captions from the glasses mic",
+                                icon: "translate",
+                                tint: .green
+                            )
+                        }
+                        .accessibilityIdentifier("apps.translateLink")
                     }
-                    .accessibilityIdentifier("apps.translateLink")
 
-                    NavigationLink {
-                        NotesWidgetView()
-                    } label: {
-                        HUDAppCard(
-                            title: "Notes & Prompts",
-                            subtitle: "Keep a line of text in view",
-                            icon: "text.alignleft",
-                            tint: .purple
-                        )
+                    if notesWidgetEnabled {
+                        NavigationLink {
+                            NotesWidgetView()
+                        } label: {
+                            HUDAppCard(
+                                title: "Notes & Prompts",
+                                subtitle: "Keep a line of text in view",
+                                icon: "text.alignleft",
+                                tint: .purple
+                            )
+                        }
+                        .accessibilityIdentifier("apps.notesLink")
                     }
-                    .accessibilityIdentifier("apps.notesLink")
                 }
                 .padding(16)
             }
@@ -87,12 +99,32 @@ struct AppsTab: View {
             }
         }
         .onAppear {
+            loadFeatureFlags()
             transitViewModel.bind(bluetoothManager: bluetoothManager)
         }
         .onChange(of: appActionRouter.translationStartRevision) { _, _ in
             path = NavigationPath()
             path.append(HeadsUpDestination.translate)
         }
+    }
+
+    private func loadFeatureFlags() {
+        transitWidgetEnabled = FeatureFlagManager.shared.boolValue(
+            forKey: EvenG1FeatureFlagKey.transitWidgetEnabled,
+            defaultValue: true
+        )
+        notificationsWidgetEnabled = FeatureFlagManager.shared.boolValue(
+            forKey: EvenG1FeatureFlagKey.notificationsWidgetEnabled,
+            defaultValue: true
+        )
+        translateWidgetEnabled = FeatureFlagManager.shared.boolValue(
+            forKey: EvenG1FeatureFlagKey.translateWidgetEnabled,
+            defaultValue: true
+        )
+        notesWidgetEnabled = FeatureFlagManager.shared.boolValue(
+            forKey: EvenG1FeatureFlagKey.notesWidgetEnabled,
+            defaultValue: true
+        )
     }
 }
 

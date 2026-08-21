@@ -50,6 +50,7 @@ final class DatadogTelemetryTests: XCTestCase {
         XCTAssertTrue(config.trackWatchdogTerminations)
         XCTAssertTrue(config.trackAnonymousUser)
         XCTAssertTrue(config.trackMemoryWarnings)
+        XCTAssertTrue(config.featureFlagsEnabled)
         XCTAssertEqual(config.longTaskThreshold, 0.25)
         XCTAssertEqual(config.appHangThreshold, 2.0)
         XCTAssertEqual(config.vitalsUpdateFrequency, .frequent)
@@ -77,6 +78,18 @@ final class DatadogTelemetryTests: XCTestCase {
         XCTAssertEqual(FeatureFlagManager.shared.intValue(forKey: "audio_sample_rate", defaultValue: 8000), 16000)
         XCTAssertEqual(FeatureFlagManager.shared.stringValue(forKey: "experiment_layout", defaultValue: "list"), "grid")
         XCTAssertFalse(FeatureFlagManager.shared.boolValue(forKey: "non_existent_flag", defaultValue: false))
+    }
+
+    func testFeatureFlagManagerReturnsDefaultWithoutMockOrRemoteClient() {
+        FeatureFlagManager.shared.clearMockFlags()
+
+        XCTAssertFalse(FeatureFlagManager.shared.boolValue(forKey: "missing.bool.flag", defaultValue: false))
+        XCTAssertEqual(
+            FeatureFlagManager.shared.stringValue(forKey: "missing.string.flag", defaultValue: "fallback"),
+            "fallback"
+        )
+        XCTAssertEqual(FeatureFlagManager.shared.intValue(forKey: "missing.int.flag", defaultValue: 42), 42)
+        XCTAssertEqual(FeatureFlagManager.shared.doubleValue(forKey: "missing.double.flag", defaultValue: 1.5), 1.5)
     }
     
     func testExperimentManagerAssignmentAndConversion() {

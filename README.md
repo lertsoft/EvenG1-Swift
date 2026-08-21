@@ -76,11 +76,13 @@ What is collected:
   Bluetooth failures, reported to both Logs and RUM Error Tracking.
 - **Crashes, memory warnings, watchdog terminations, and app hangs**.
 
-Feature flags and experiments are evaluated locally, from mock values or the
-caller's default; only the resulting evaluations are sent to Datadog, so they
-correlate with sessions and errors. Serving real values is still an open task.
-The `DatadogFlags` module in SDK 3.x can deliver them through `FlagsClient`,
-which would replace the mock table in `FeatureFlagManager`.
+Feature flags are delivered by the Datadog Feature Flags SDK (`DatadogFlags`) through
+`FlagsClient`, initialized in `DatadogTelemetryService` after RUM starts. Flag keys
+live in `EvenG1FeatureFlagKey` and are evaluated through `FeatureFlagManager` and
+`ExperimentManager`. Mock overrides (`setMockFlag`, `setMockVariant`) still work for
+tests and offline development; when the remote client is active, exposures are
+reported automatically to RUM. Create matching flags in the Datadog UI to control tab
+visibility, Heads-Up widgets, and experiments such as `experiment.mta_board.layout`.
 
 Enabling telemetry means the app collects usage data, which changes what you
 must declare in `PrivacyInfo.xcprivacy` and in App Store privacy answers.
