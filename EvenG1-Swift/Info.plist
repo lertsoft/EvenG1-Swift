@@ -34,6 +34,10 @@
 	<string>public.app-category.utilities</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>EvenG1 connects to your Even Realities G1 glasses over Bluetooth.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>EvenG1 shows your next event on the glasses dashboard.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>EvenG1 shows your upcoming reminders count on the glasses dashboard.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>EvenG1 uses your location to plan routes, provide live navigation directions, and find nearby transit.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

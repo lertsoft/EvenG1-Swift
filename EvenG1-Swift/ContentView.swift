@@ -16,6 +16,10 @@ struct ContentView: View {
     /// Owned here so transit state survives navigating between tabs.
     @StateObject private var transitViewModel = MTATrainViewModel()
 
+    /// Owned here so the default dashboard can respond to head-up regardless of
+    /// which tab is on screen.
+    @StateObject private var dashboardViewModel = DashboardViewModel()
+
     @State private var selectedTab = 0
     @State private var transitCatalogSubtitle = "Next trains at your station"
     @State private var deviceTabEnabled = true
@@ -105,7 +109,8 @@ struct ContentView: View {
             if headsUpTabEnabled {
                 AppsTab(
                     transitSubtitle: transitCatalogSubtitle,
-                    transitViewModel: transitViewModel
+                    transitViewModel: transitViewModel,
+                    dashboardViewModel: dashboardViewModel
                 )
                     .trackDatadogRUMView(name: "AppsTab", attributes: rumViewAttributes)
                     .tabItem {
@@ -144,6 +149,7 @@ struct ContentView: View {
     private func handleAppear() {
         loadFeatureFlags()
         transitViewModel.bind(bluetoothManager: bluetoothManager)
+        dashboardViewModel.bind(bluetoothManager: bluetoothManager)
         voiceCoordinator.bind(to: bluetoothManager)
         notificationMirror.bind(bluetoothManager: bluetoothManager)
         notificationMirror.setAppActive(scenePhase == .active)
@@ -176,7 +182,12 @@ struct ContentView: View {
             case .navigation:
                 // NavigateTab drives navigation from its own subscription.
                 return
-            case .transit, .dashboardFallback:
+            case .dashboardFallback:
+                // Nobody else is drawing custom content, so the default dashboard
+                // gets the head gesture (it no-ops when disabled).
+                Task { await dashboardViewModel.handleGlassesEvent(event) }
+                return
+            case .transit:
                 break
             }
         }

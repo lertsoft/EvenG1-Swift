@@ -10,11 +10,13 @@ struct AppsTab: View {
 
     let transitSubtitle: String
     @ObservedObject var transitViewModel: MTATrainViewModel
+    @ObservedObject var dashboardViewModel: DashboardViewModel
     @State private var path = NavigationPath()
     @State private var transitWidgetEnabled = true
     @State private var notificationsWidgetEnabled = true
     @State private var translateWidgetEnabled = true
     @State private var notesWidgetEnabled = true
+    @State private var dashboardWidgetEnabled = true
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -22,6 +24,20 @@ struct AppsTab: View {
                 VStack(spacing: 16) {
                     if bluetoothManager.connectionState != .fullyConnected {
                         DisconnectedNotice()
+                    }
+
+                    if dashboardWidgetEnabled {
+                        NavigationLink {
+                            DashboardWidgetView(viewModel: dashboardViewModel)
+                        } label: {
+                            HUDAppCard(
+                                title: "Dashboard",
+                                subtitle: "Time, calendar, and a widget on look up",
+                                icon: "square.grid.2x2.fill",
+                                tint: .green
+                            )
+                        }
+                        .accessibilityIdentifier("apps.dashboardLink")
                     }
 
                     if transitWidgetEnabled {
@@ -126,6 +142,10 @@ struct AppsTab: View {
         )
         notesWidgetEnabled = FeatureFlagManager.shared.boolValue(
             forKey: EvenG1FeatureFlagKey.notesWidgetEnabled,
+            defaultValue: true
+        )
+        dashboardWidgetEnabled = FeatureFlagManager.shared.boolValue(
+            forKey: EvenG1FeatureFlagKey.dashboardWidgetEnabled,
             defaultValue: true
         )
     }

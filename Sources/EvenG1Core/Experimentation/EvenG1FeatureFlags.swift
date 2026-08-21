@@ -25,6 +25,7 @@ public enum EvenG1FeatureFlagKey {
     public static let notificationsWidgetEnabled = "feature.notifications_widget.enabled"
     public static let translateWidgetEnabled = "feature.translate_widget.enabled"
     public static let notesWidgetEnabled = "feature.notes_widget.enabled"
+    public static let dashboardWidgetEnabled = "feature.dashboard_widget.enabled"
 
     // MARK: - Experiments
 
