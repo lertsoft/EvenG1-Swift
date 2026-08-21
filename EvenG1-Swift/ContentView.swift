@@ -33,6 +33,9 @@ struct ContentView: View {
             .tint(.cyan)
             .environmentObject(developerSettings)
             .onAppear(perform: handleAppear)
+            .onReceive(NotificationCenter.default.publisher(for: .evenG1FeatureFlagsDidBecomeReady)) { _ in
+                loadFeatureFlags()
+            }
             .modifier(NotificationMirrorLifecycle(
                 scenePhase: scenePhase,
                 navigationSessionState: bluetoothManager.navigationSessionState,
@@ -63,7 +66,23 @@ struct ContentView: View {
             }
     }
 
+    @ViewBuilder
     private var tabs: some View {
+        if deviceTabEnabled || navigateTabEnabled || headsUpTabEnabled {
+            enabledTabs
+        } else {
+            // Every top-level surface is remotely disabled. Show a maintenance
+            // screen rather than an empty TabView, which would render blank.
+            ContentUnavailableView(
+                "Temporarily Unavailable",
+                systemImage: "wrench.and.screwdriver",
+                description: Text("The app is being updated. Please check back shortly.")
+            )
+            .accessibilityIdentifier("app.maintenanceScreen")
+        }
+    }
+
+    private var enabledTabs: some View {
         TabView(selection: $selectedTab) {
             if deviceTabEnabled {
                 DeviceTab()

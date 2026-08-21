@@ -332,12 +332,37 @@ final class MTATrainViewModel: ObservableObject {
 
     private var currentPageIndex: Int = 0
 
+    /// Direction feeding the visual board. The `single_summary` layout experiment
+    /// collapses the dual "both" board into a single-direction summary, but it must
+    /// never override a direction the user explicitly chose. When the user has no
+    /// direction preference, it picks a direction that actually has arrivals so a
+    /// downtown-only (or uptown-only) station is never left with a blank board.
     private var effectiveDirectionModeForVisualBoard: MTADirectionPreferenceMode {
-        switch mtaBoardLayoutVariant {
-        case "single_summary":
-            return .uptownOnly
-        default:
+        guard mtaBoardLayoutVariant == "single_summary" else {
             return currentStationPreferenceMode
+        }
+
+        switch currentStationPreferenceMode {
+        case .uptownOnly, .downtownOnly:
+            return currentStationPreferenceMode
+        case .both:
+            return singleSummaryDirectionForBothPreference()
+        }
+    }
+
+    private func singleSummaryDirectionForBothPreference() -> MTADirectionPreferenceMode {
+        let hasUptown = upcomingTrains.contains { mtaDirectionBucket(for: $0.direction) == .uptown }
+        let hasDowntown = upcomingTrains.contains { mtaDirectionBucket(for: $0.direction) == .downtown }
+
+        switch (hasUptown, hasDowntown) {
+        case (true, _):
+            return .uptownOnly
+        case (false, true):
+            return .downtownOnly
+        case (false, false):
+            // Nothing to summarize either way; keep the dual layout so the
+            // "no arrivals" page still renders as usual.
+            return .both
         }
     }
 

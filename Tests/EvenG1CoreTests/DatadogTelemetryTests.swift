@@ -91,6 +91,39 @@ final class DatadogTelemetryTests: XCTestCase {
         XCTAssertEqual(FeatureFlagManager.shared.intValue(forKey: "missing.int.flag", defaultValue: 42), 42)
         XCTAssertEqual(FeatureFlagManager.shared.doubleValue(forKey: "missing.double.flag", defaultValue: 1.5), 1.5)
     }
+
+    /// Mirrors the remote-readiness flow: a clean launch evaluates to the default
+    /// before assignments load, then re-evaluates to the resolved value once they
+    /// arrive (here simulated by registering the value the client would supply).
+    func testFeatureFlagManagerReevaluatesWhenValueBecomesAvailable() {
+        FeatureFlagManager.shared.clearMockFlags()
+
+        // Before assignments arrive: default is returned.
+        XCTAssertTrue(
+            FeatureFlagManager.shared.boolValue(
+                forKey: EvenG1FeatureFlagKey.headsUpTabEnabled,
+                defaultValue: true
+            )
+        )
+
+        // Assignments arrive (remote client would now serve this value).
+        FeatureFlagManager.shared.setMockFlag(key: EvenG1FeatureFlagKey.headsUpTabEnabled, value: false)
+
+        // Re-evaluation reflects the resolved value.
+        XCTAssertFalse(
+            FeatureFlagManager.shared.boolValue(
+                forKey: EvenG1FeatureFlagKey.headsUpTabEnabled,
+                defaultValue: true
+            )
+        )
+    }
+
+    func testFeatureFlagsReadyNotificationNameIsStable() {
+        XCTAssertEqual(
+            Notification.Name.evenG1FeatureFlagsDidBecomeReady.rawValue,
+            "com.eveng1.featureFlags.didBecomeReady"
+        )
+    }
     
     func testExperimentManagerAssignmentAndConversion() {
         ExperimentManager.shared.setMockVariant(experimentKey: "mta_board_exp", variant: "variant_b")

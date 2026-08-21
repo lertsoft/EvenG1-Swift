@@ -106,6 +106,9 @@ struct AppsTab: View {
             path = NavigationPath()
             path.append(HeadsUpDestination.translate)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .evenG1FeatureFlagsDidBecomeReady)) { _ in
+            loadFeatureFlags()
+        }
     }
 
     private func loadFeatureFlags() {

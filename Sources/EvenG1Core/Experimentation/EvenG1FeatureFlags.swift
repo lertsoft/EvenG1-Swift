@@ -1,5 +1,13 @@
 import Foundation
 
+public extension Notification.Name {
+    /// Posted once the Datadog Feature Flags client has finished loading remote
+    /// assignments for the current evaluation context. Observers should re-evaluate
+    /// flags so a clean launch reflects remote values instead of the launch-time
+    /// defaults returned before assignments arrived.
+    static let evenG1FeatureFlagsDidBecomeReady = Notification.Name("com.eveng1.featureFlags.didBecomeReady")
+}
+
 /// Typed Datadog feature-flag and experiment keys used across the app.
 ///
 /// Keys use dot-separated segments and avoid special characters Datadog rejects

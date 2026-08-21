@@ -131,11 +131,10 @@ public final class DatadogTelemetryService: @unchecked Sendable {
 
 #if canImport(DatadogFlags)
     private func configureFeatureFlags(config: DatadogConfig) {
-        var flagsConfig = Flags.Configuration()
+        let flagsConfig = Flags.Configuration()
         Flags.enable(with: flagsConfig)
         FlagsClient.create()
         let client = FlagsClient.shared()
-        lock.withLock { _flagsClient = client }
 
         let evaluationContext = FlagsEvaluationContext(
             targetingKey: TelemetryIdentity.anonymousInstallID(),
@@ -146,6 +145,11 @@ public final class DatadogTelemetryService: @unchecked Sendable {
             ]
         )
 
+        // The client is published only after assignments load. Evaluating flags
+        // before this returns defaults, so exposing the client earlier would let a
+        // clean launch cache defaults it never revisits. On completion we also post
+        // a readiness notification so already-visible screens re-evaluate with the
+        // freshly loaded remote values.
         Task {
             do {
                 try await client.setEvaluationContext(evaluationContext)
@@ -153,6 +157,9 @@ public final class DatadogTelemetryService: @unchecked Sendable {
             } catch {
                 diagnostics.error("Failed to set feature flags context: \(error.localizedDescription, privacy: .public)")
             }
+
+            lock.withLock { _flagsClient = client }
+            NotificationCenter.default.post(name: .evenG1FeatureFlagsDidBecomeReady, object: nil)
         }
     }
 #endif
