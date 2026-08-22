@@ -21,6 +21,13 @@ Source examples:
 - NACK failure: `0xCA`
 - CONTINUE: `0xCB` (seen for some command paths)
 - Init command: `0x4D 0x01`
+- `0x26` hardware-setting responses are structured rather than one-byte ACKs:
+  - meaningful prefix: `26 06 00 <seq> <subcommand> C9`
+  - after removing the command byte, sequence is payload offset 2 and status is
+    payload offset 4
+  - responses may include trailing padding
+  - matching only `(side, command)` or reading payload offset 0 as status causes
+    false timeouts for sequence-keyed waiters
 
 Source examples:
 - `MentraOS-main/mobile/modules/core/ios/Source/utils/Enums.swift`
@@ -50,10 +57,16 @@ Important subcommands repeatedly used:
 
 - `0x00`: exit / double tap behavior
 - `0x01`: page control / tap behavior
-- `0x17`: start Even AI flow
-- `0x18`: stop Even AI recording
+- `0x17`: left TouchBar hold threshold / start stock Even AI flow
+- `0x18`: left TouchBar release / stop stock Even AI recording
+- `0x20`: host-handled double-tap action; verified after mapping double tap to
+  Translate with `26 06 00 <seq> 05 02`
 - `0x02` / `0x03`: head up/down in several implementations
 - `0x08`, `0x0B`, `0x0E`, `0x0F`: case state and battery-related events (Mentra/Fahrplan usage)
+
+On the tested firmware, `F5 20` produces no stock UI. `F5 00` is emitted when
+double-tapping out of an active text/captions surface. The same physical action
+may be reported by both arms, so consumers must coalesce duplicate stop events.
 
 Source examples:
 - `EvenDemoApp-main/lib/ble_manager.dart`
@@ -92,6 +105,9 @@ Source examples:
   16 kHz mono output (160 signed 16-bit PCM samples/frame)
 - Practical behavior in community repos:
   - mic control sent to right side for reliability in some cases
+  - this app's Live Captions hardware runs proved the left arm reliable for
+    repeated `0x0E 01`/`0x0E 00` start-stop cycles; preferring left avoided the
+    earlier right-arm timeout/fallback sequence
 
 Source examples:
 - `EvenDemoApp-main/README.md`
@@ -151,9 +167,21 @@ Source examples:
     blocks them and uses `0x08` instead.
 - Silent mode: `0x03`
 - Raster/display position settings: `0x26` (length, sequence, action, enable, height, distance)
+- Touch-action settings on the `0x26` family:
+  - double-tap action: `26 06 00 <seq> 05 <action>`
+  - `action=0x02`: host-handled Translate; emits `F5 20` without stock UI
+  - `action=0x00`: no action / close active feature
+  - long-press action probe: `26 06 00 <seq> 07 00`
+  - the long-press probe ACKed on both arms and preserved `F5 17`/`F5 18`, but
+    did **not** suppress the visible Even AI overlay on the tested firmware
 - Legacy experimental navigation packets used `0x0A`; this inferred payload
   family remains hardware-gated and must not be enabled on the verified
   dashboard path.
+
+The verified Live Captions control maps both arms to double-tap Translate,
+routes `F5 20` to start, and routes active-surface `F5 00` to stop. See
+[`LIVE_CAPTIONS_GESTURE_CONTROL.md`](LIVE_CAPTIONS_GESTURE_CONTROL.md) for the
+full failed-attempt chronology and command sequences.
 
 Source examples:
 - `MentraOS-main/mobile/modules/core/ios/Source/sgcs/G1.swift`

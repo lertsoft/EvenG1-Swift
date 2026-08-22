@@ -13,11 +13,21 @@ struct TranslateWidgetView: View {
 
     @AppStorage("translation.sourceLanguage") private var sourceIdentifier = "en"
     @AppStorage("translation.targetLanguage") private var targetIdentifier = "es"
+    @AppStorage(TranslationPreferences.sideButtonEnabledKey)
+    private var sideButtonActivationEnabled = false
+    @AppStorage(TranslationPreferences.sideButtonDurationKey)
+    private var sideButtonDurationSeconds =
+        TranslationPreferences.defaultSideButtonDurationSeconds
     @State private var configuration: TranslationSession.Configuration?
+    @State private var configuredSourceIdentifier: String?
+    @State private var configuredTargetIdentifier: String?
     @State private var sessionBox: TranslationSessionBox?
     @State private var translatedText = ""
     @State private var statusText = "Choose languages, then start live captions."
     @State private var isRunning = false
+    @State private var sideButtonAutoStopAt: Date?
+    @State private var preferredMicrophoneSide: GlassesSide = .right
+    @State private var pendingExternalStartRevision: Int?
 
     private let languages: [TranslationLanguageChoice] = [
         .init(identifier: "en", name: "English"),
@@ -30,6 +40,13 @@ struct TranslateWidgetView: View {
         .init(identifier: "ko", name: "Korean"),
         .init(identifier: "zh-Hans", name: "Chinese (Simplified)")
     ]
+    private let sideButtonDurations: [TranslationDurationChoice] = [
+        .init(seconds: 60, name: "1 minute"),
+        .init(seconds: 300, name: "5 minutes"),
+        .init(seconds: 900, name: "15 minutes"),
+        .init(seconds: 1_800, name: "30 minutes"),
+        .init(seconds: 0, name: "Until stopped")
+    ]
 
     var body: some View {
         List {
@@ -40,6 +57,9 @@ struct TranslateWidgetView: View {
                 Picker("Display language", selection: $targetIdentifier) {
                     ForEach(languages) { Text($0.name).tag($0.identifier) }
                 }
+                Text("Speech and translation stay on this device. The selected languages require a one-time download before offline use.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Live captions") {
@@ -67,35 +87,47 @@ struct TranslateWidgetView: View {
                 )
                 .accessibilityIdentifier("translation.toggleButton")
 
-                Text("You can also press and hold the left glasses TouchBar to start live captions while this screen is open.")
+            }
+
+            Section("Glasses TouchBar") {
+                Toggle("Control captions with double tap", isOn: $sideButtonActivationEnabled)
+                Picker("Session length", selection: $sideButtonDurationSeconds) {
+                    ForEach(sideButtonDurations) { choice in
+                        Text(choice.name).tag(choice.seconds)
+                    }
+                }
+                .disabled(!sideButtonActivationEnabled)
+
+                Text("Double-tap either TouchBar to start or stop captions. This avoids the stock Even AI long-press action.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Voice assistant") {
-                Text("Outside Live Translate, hold the glasses side button, speak, and release to use the voice assistant.")
+                Text("Outside Live Translate, hold the left-arm TouchBar, speak, and release to use the voice assistant.")
                 Text(voiceCoordinator.assistantAvailability.message)
                     .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Translate")
-        .onAppear {
-            appActionRouter.setTranslationForeground(true)
-        }
         .translationTask(configuration) { newSession in
             let box = TranslationSessionBox(newSession)
             sessionBox = box
             do {
                 statusText = "Preparing on-device languages…"
                 try await box.prepare()
+                try await verifyOfflineTranslationAssets()
                 guard isRunning, sessionBox === box else { return }
-                statusText = "Starting the glasses microphone…"
-                if await voiceCoordinator.startTranslation() {
+                statusText = "Offline languages ready. Starting the glasses microphone…"
+                if await voiceCoordinator.startTranslation(
+                    preferredMicrophoneSide: preferredMicrophoneSide
+                ) {
                     statusText = "Listening through the glasses"
+                    completeExternalStartRequest()
                 } else {
                     isRunning = false
-                    configuration = nil
                     sessionBox = nil
+                    completeExternalStartRequest()
                     if case .failed(let message) = voiceCoordinator.mode {
                         statusText = message
                     } else {
@@ -106,17 +138,19 @@ struct TranslateWidgetView: View {
                 guard sessionBox === box else { return }
                 statusText = error.localizedDescription
                 isRunning = false
-                configuration = nil
                 sessionBox = nil
+                completeExternalStartRequest()
                 await voiceCoordinator.stopTranslation()
             }
         }
-        .onChange(of: voiceCoordinator.translationRevision) { _, _ in
-            guard let source = voiceCoordinator.finalizedTranslationSource else { return }
-            Task { await translate(source) }
+        .task(id: voiceCoordinator.translationRevision) {
+            guard voiceCoordinator.translationRevision > 0,
+                  let source = voiceCoordinator.finalizedTranslationSource else { return }
+            let revision = voiceCoordinator.translationRevision
+            await translate(source, revision: revision)
         }
         .onDisappear {
-            appActionRouter.setTranslationForeground(false)
+            sideButtonAutoStopAt = nil
             if isRunning {
                 Task { await voiceCoordinator.stopTranslation() }
             }
@@ -124,8 +158,9 @@ struct TranslateWidgetView: View {
         .onChange(of: voiceCoordinator.isTranslationActive) { wasActive, isActive in
             guard wasActive, !isActive, isRunning else { return }
             isRunning = false
-            configuration = nil
             sessionBox = nil
+            sideButtonAutoStopAt = nil
+            translatedText = ""
             if case .failed(let message) = voiceCoordinator.mode {
                 statusText = message
             } else {
@@ -135,55 +170,135 @@ struct TranslateWidgetView: View {
         .onChange(of: voiceCoordinator.translationStopRevision) { _, _ in
             guard isRunning else { return }
             isRunning = false
-            configuration = nil
             sessionBox = nil
+            sideButtonAutoStopAt = nil
+            translatedText = ""
             statusText = "Stopped"
         }
         .task(id: appActionRouter.translationStartRevision) {
-            guard appActionRouter.translationStartRevision > 0, !isRunning else { return }
-            await toggleTranslation()
+            guard let request = appActionRouter.consumeTranslationStartRequest() else {
+                return
+            }
+            guard !isRunning else {
+                appActionRouter.completeTranslationStartRequest(revision: request.revision)
+                return
+            }
+            pendingExternalStartRevision = request.revision
+            let accepted = await toggleTranslation(
+                preferredMicrophoneSide: request.startedFromSideButton ? .left : .right,
+                displayAlreadyCleared: request.startedFromSideButton
+            )
+            guard accepted else {
+                completeExternalStartRequest()
+                return
+            }
+            if let seconds = request.autoStopSeconds {
+                sideButtonAutoStopAt = Date().addingTimeInterval(TimeInterval(seconds))
+            }
+        }
+        .task(id: sideButtonAutoStopAt) {
+            guard let stopAt = sideButtonAutoStopAt else { return }
+            let milliseconds = Int64(max(0, stopAt.timeIntervalSinceNow) * 1_000)
+            do {
+                try await Task.sleep(for: .milliseconds(milliseconds))
+            } catch {
+                return
+            }
+            guard isRunning, sideButtonAutoStopAt == stopAt else { return }
+            await stopTranslation(status: "Side-button live captions ended.")
         }
     }
 
-    private func toggleTranslation() async {
+    private func toggleTranslation(
+        preferredMicrophoneSide: GlassesSide = .right,
+        displayAlreadyCleared: Bool = false
+    ) async -> Bool {
         if isRunning {
-            isRunning = false
-            configuration = nil
-            sessionBox = nil
-            await voiceCoordinator.stopTranslation()
-            statusText = "Stopped"
-            return
+            await stopTranslation(status: "Stopped")
+            return false
         }
 
         guard bluetoothManager.connectionState == .fullyConnected else {
             statusText = "Connect both glasses before starting live captions."
-            return
+            return false
         }
         guard sourceIdentifier != targetIdentifier else {
             statusText = "Choose two different languages."
-            return
+            return false
         }
 
-        await voiceCoordinator.prepareDisplayForTranslation()
+        await voiceCoordinator.prepareDisplayForTranslation(
+            displayAlreadyCleared: displayAlreadyCleared
+        )
         isRunning = true
         translatedText = ""
         sessionBox = nil
+        self.preferredMicrophoneSide = preferredMicrophoneSide
         voiceCoordinator.speechLocaleIdentifier = sourceIdentifier
         statusText = "Preparing languages…"
-        configuration = TranslationSession.Configuration(
-            source: Locale.Language(identifier: sourceIdentifier),
-            target: Locale.Language(identifier: targetIdentifier)
-        )
+        triggerTranslationSession()
+        return true
     }
 
-    private func translate(_ source: String) async {
+    private func stopTranslation(status: String) async {
+        isRunning = false
+        sessionBox = nil
+        sideButtonAutoStopAt = nil
+        translatedText = ""
+        await voiceCoordinator.stopTranslation()
+        statusText = status
+    }
+
+    private func completeExternalStartRequest() {
+        guard let revision = pendingExternalStartRevision else { return }
+        pendingExternalStartRevision = nil
+        appActionRouter.completeTranslationStartRequest(revision: revision)
+    }
+
+    private func triggerTranslationSession() {
+        if configuration != nil,
+           configuredSourceIdentifier == sourceIdentifier,
+           configuredTargetIdentifier == targetIdentifier {
+            configuration?.invalidate()
+        } else {
+            configuration = TranslationSession.Configuration(
+                source: Locale.Language(identifier: sourceIdentifier),
+                target: Locale.Language(identifier: targetIdentifier)
+            )
+            configuredSourceIdentifier = sourceIdentifier
+            configuredTargetIdentifier = targetIdentifier
+        }
+    }
+
+    private func verifyOfflineTranslationAssets() async throws {
+        let source = Locale.Language(identifier: sourceIdentifier)
+        let target = Locale.Language(identifier: targetIdentifier)
+        let status = await LanguageAvailability().status(from: source, to: target)
+
+        switch status {
+        case .installed:
+            return
+        case .supported:
+            throw OfflineTranslationError.assetsNotInstalled
+        case .unsupported:
+            throw OfflineTranslationError.unsupportedLanguagePair
+        @unknown default:
+            throw OfflineTranslationError.unknownAvailability
+        }
+    }
+
+    private func translate(_ source: String, revision: Int) async {
         guard isRunning, let sessionBox else { return }
         do {
             let targetText = try await sessionBox.translate(source)
+            guard revision == voiceCoordinator.translationRevision else {
+                return
+            }
             translatedText = targetText
             voiceCoordinator.publishTranslation(targetText)
             statusText = "Listening through the glasses"
         } catch {
+            guard !Task.isCancelled else { return }
             statusText = error.localizedDescription
         }
     }
@@ -193,6 +308,29 @@ private struct TranslationLanguageChoice: Identifiable {
     let identifier: String
     let name: String
     var id: String { identifier }
+}
+
+private struct TranslationDurationChoice: Identifiable {
+    let seconds: Int
+    let name: String
+    var id: Int { seconds }
+}
+
+private enum OfflineTranslationError: LocalizedError {
+    case assetsNotInstalled
+    case unsupportedLanguagePair
+    case unknownAvailability
+
+    var errorDescription: String? {
+        switch self {
+        case .assetsNotInstalled:
+            return "The offline language download is not finished. Connect once, complete the download, then try again."
+        case .unsupportedLanguagePair:
+            return "Apple Translation does not support this language pair."
+        case .unknownAvailability:
+            return "Offline translation availability could not be confirmed."
+        }
+    }
 }
 
 /// TranslationSession predates Swift 6's Sendable annotations. Calls are

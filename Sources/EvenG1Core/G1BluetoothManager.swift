@@ -270,8 +270,8 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     /// Side currently handling microphone control.
     private var activeMicrophoneSide: GlassesSide?
 
-    /// Sequence used by the vendor-documented 0x26 display settings packet.
-    private var displaySettingsSequence: UInt8 = 0
+    /// Sequence shared by vendor-documented `0x26` hardware settings packets.
+    private var hardwareSettingsSequence: UInt8 = 0
 
     /// Transport ID used by the vendor notification packet header.
     private var notificationTransportID: UInt8 = 0
@@ -1210,6 +1210,33 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         return acked
     }
 
+    /// Set the persisted firmware action assigned to a double tap.
+    ///
+    /// `0x02` is the host-handled Translate action documented to emit `F5 20`;
+    /// `0x00` restores the no-action/close-active-feature behavior.
+    public func setFirmwareDoubleTapAction(_ action: UInt8) async -> Bool {
+        guard connectionState == .fullyConnected else {
+            return false
+        }
+        let sequence = hardwareSettingsSequence
+        hardwareSettingsSequence &+= 1
+        let packet = Data([
+            G1Command.DISPLAY_SETTINGS.rawValue,
+            0x06, 0x00, sequence, 0x05, action
+        ])
+        let acked = await sendCommandAwaitAck(
+            packet,
+            sequence: sequence,
+            timeoutMs: max(1_000, G1BLEConstants.commandTimeoutMs)
+        )
+        log(
+            "Firmware double-tap action set to 0x\(String(format: "%02X", action))"
+                + (acked ? "" : " (command failed)"),
+            level: acked ? .info : .warning
+        )
+        return acked
+    }
+
     /// Show or hide the built-in dashboard UI on one side or both sides.
     @discardableResult
     public func setDashboardVisible(_ visible: Bool, to side: GlassesSide? = nil) async -> Bool {
@@ -1240,8 +1267,8 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             return false
         }
 
-        let sequence = displaySettingsSequence
-        displaySettingsSequence &+= 1
+        let sequence = hardwareSettingsSequence
+        hardwareSettingsSequence &+= 1
         let packet = G1DisplaySettingsPacketBuilder.positionPacket(settings: settings, sequence: sequence)
         let acked = await sendCommandAwaitAck(
             packet,
@@ -2560,6 +2587,14 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
                 // Short heartbeat response shape: [seq]
                 sequence = payload[0]
             }
+        } else if command == G1Command.DISPLAY_SETTINGS.rawValue,
+                  frame.payload.count >= 5 {
+            // Hardware-settings response: [length, 0x00, seq, subcommand, status].
+            // The old generic parser treated `length` as status and discarded the
+            // sequence, so every sequenced 0x26 waiter timed out.
+            sequence = frame.payload[2]
+            let status = frame.payload[4]
+            success = status != G1Response.NACK.rawValue
         } else if let status = frame.payload.first {
             if status == G1Response.ACK.rawValue || status == G1Response.CONTINUE.rawValue {
                 success = true
@@ -2571,7 +2606,12 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             }
         }
         
-        _ = resolvePendingAck(side: side, command: command, sequence: sequence, success: success)
+        _ = resolvePendingAck(
+            side: side,
+            command: command,
+            sequence: sequence,
+            success: success
+        )
     }
     
     private func shouldRouteAck(for command: UInt8) -> Bool {

@@ -7,6 +7,7 @@ final class AppleSpeechTranscriber {
     enum TranscriberError: LocalizedError {
         case permissionDenied
         case unavailable
+        case offlineRecognitionUnavailable
         case audioFormatUnavailable
 
         var errorDescription: String? {
@@ -15,6 +16,8 @@ final class AppleSpeechTranscriber {
                 return "Speech recognition permission is required."
             case .unavailable:
                 return "Speech recognition is unavailable for this language."
+            case .offlineRecognitionUnavailable:
+                return "Offline speech recognition is not installed for this language."
             case .audioFormatUnavailable:
                 return "The glasses audio format could not be created."
             }
@@ -66,11 +69,16 @@ final class AppleSpeechTranscriber {
             throw TranscriberError.unavailable
         }
 
+        let supportsOffline = recognizer.supportsOnDeviceRecognition
+        if preferOffline, !supportsOffline {
+            throw TranscriberError.offlineRecognitionUnavailable
+        }
+
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
         request.taskHint = .dictation
-        if preferOffline, recognizer.supportsOnDeviceRecognition {
+        if preferOffline {
             request.requiresOnDeviceRecognition = true
         }
 

@@ -1,12 +1,14 @@
 # G1 Firmware Behavior Notes
 
 Observed on real hardware (dual-arm G1, firmware as shipped mid-2026) while
-debugging navigation head-up and display ownership. Every entry below is backed
-by NDJSON runtime logs from device sessions; the "confidence" column separates
-what the logs prove from what remains inference.
+debugging navigation, display ownership, and Live Captions gesture control.
+Every entry below is backed by runtime logs from device sessions; the
+"confidence" column separates what the logs prove from what remains inference.
 
 For the complete custom-dashboard investigation and final implementation, see
 [`CUSTOM_DASHBOARD_TROUBLESHOOTING.md`](CUSTOM_DASHBOARD_TROUBLESHOOTING.md).
+For the TouchBar/Live Captions investigation, see
+[`LIVE_CAPTIONS_GESTURE_CONTROL.md`](LIVE_CAPTIONS_GESTURE_CONTROL.md).
 
 ## 0xF5 device event codes
 
@@ -16,6 +18,7 @@ the app maps (tap/swipe/head) are in `G1DeviceEvent`. Codes observed as
 
 | Code | Observed values | Meaning | Confidence |
 | --- | --- | --- | --- |
+| `0x00` | `00` | double-tap close/exit while an advanced text surface is active | verified |
 | `0x02` | `00` | primary head-up motion event on tested firmware | verified |
 | `0x03` | `00` | primary head-down/return-to-level motion event on tested firmware | verified |
 | `0x07` | `00` | display/dashboard surface state, reported single-arm | inferred |
@@ -23,6 +26,10 @@ the app maps (tap/swipe/head) are in `G1DeviceEvent`. Codes observed as
 | `0x09` | `01` | wear or case state change, always a left+right pair | inferred |
 | `0x0A` | `18`-`21`, `28`, `32`-`39` | part of a recurring `0A`/`09`/`0E` status triplet spaced about a second apart; not tilt, values do not track head movement | inferred |
 | `0x0E` | `01` | charge or case state, immediately precedes `caseBattery` | inferred |
+| `0x12` | `14` | long-press action follow-on; correlated with the stock flow but not sufficient to cause its UI | verified correlation |
+| `0x17` | `00` | left TouchBar hold threshold / stock Even AI entry path | verified |
+| `0x18` | `00` | left TouchBar release after `F5 17` | verified |
+| `0x20` | `00` | host-handled double tap when action is mapped to Translate/`0x02` | verified |
 
 `0x07`/`0x08`/`0x09`/`0x0E` arrived as one clustered sequence ending in two
 `caseBattery(level: 60)` events, i.e. the glasses being taken off and put away.
@@ -91,6 +98,39 @@ head-up cycles showed no Even AI or stock dashboard while `F5 02` continued.
 `F5 12` was correlated with one earlier prompt and was instrumented as a
 possible cause. It later appeared after action suppression without producing
 any overlay, proving that the event alone is not sufficient to open Even AI.
+
+## TouchBar actions and Live Captions (2026-08-22)
+
+Left long press is firmware-owned. The glasses draw Even AI before sending
+`F5 17`, so clearing with `0x18` after receiving the event can only shorten the
+flash. It cannot prevent it.
+
+The documented long-press setting was tested on both arms:
+
+```text
+26 06 00 <seq> 07 00
+```
+
+Both arms acknowledged it and `F5 17`/`F5 18` remained available, but Even AI
+still appeared. The setting is ineffective for suppressing visible Even AI on
+this firmware and is not used by the app.
+
+The verified replacement is the host-handled double-tap Translate action:
+
+```text
+26 06 00 <seq> 05 02
+```
+
+After both arms acknowledge the mapping, double-tapping either TouchBar emits
+`F5 20` without stock UI. Live Captions starts from that event. While captions
+are active, double tap emits `F5 00`; the app stops the microphone and clears
+the lens. This start/stop cycle was repeated from both arms without showing
+Even AI.
+
+`0x26` responses are structured. Their meaningful prefix is
+`26 06 00 <seq> <subcommand> C9`, potentially followed by padding. ACK routing
+must extract the sequence from payload offset 2 and status from payload offset
+4; treating payload byte 0 as a generic status causes false timeouts.
 
 ## Firmware dashboard override strategy (2026-08)
 

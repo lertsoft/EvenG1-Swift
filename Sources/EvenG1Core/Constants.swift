@@ -120,6 +120,8 @@ public enum G1DeviceEvent: UInt8 {
     
     case PRESS_AND_HOLD = 0x17
     case PRESS_AND_RELEASE = 0x18
+    /// Host-handled action emitted when double tap is mapped to Translate.
+    case ACTION_DOUBLE_TAP = 0x20
     
     case HEAD_UP = 0x19
     case HEAD_DOWN = 0x1A

@@ -26,6 +26,7 @@ public enum G1Event: Sendable {
     // Touch events
     case singleTap
     case doubleTap
+    case actionDoubleTap
     case tripleTap
     case swipeForward
     case swipeBackward
@@ -57,6 +58,7 @@ public enum G1Event: Sendable {
         switch self {
         case .singleTap: return "👆 Single Tap"
         case .doubleTap: return "👆👆 Double Tap"
+        case .actionDoubleTap: return "👆👆 Action Double Tap"
         case .tripleTap: return "👆👆👆 Triple Tap"
         case .swipeForward: return "👉 Swipe Forward"
         case .swipeBackward: return "👈 Swipe Backward"
@@ -245,6 +247,8 @@ public final class G1FrameParser: @unchecked Sendable {
             return .headUp
         case G1DeviceEvent.HEAD_DOWN_PRIMARY.rawValue:
             return .headDown
+        case G1DeviceEvent.ACTION_DOUBLE_TAP.rawValue:
+            return .actionDoubleTap
         case G1DeviceEvent.PRESS_AND_HOLD.rawValue:
             return .pressAndHold
         case G1DeviceEvent.PRESS_AND_RELEASE.rawValue:

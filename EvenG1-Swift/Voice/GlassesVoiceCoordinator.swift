@@ -63,9 +63,10 @@ final class GlassesVoiceCoordinator: ObservableObject {
     }
 
     @discardableResult
-    func startTranslation() async -> Bool {
+    func startTranslation(preferredMicrophoneSide: GlassesSide = .right) async -> Bool {
         guard mode != .listeningForAssistant, mode != .thinking else { return false }
         translationRunning = true
+        bluetoothManager?.setCustomDisplaySurfaceClaimed(true)
         transcript = ""
         response = ""
 
@@ -76,15 +77,20 @@ final class GlassesVoiceCoordinator: ObservableObject {
         }
         do {
             try await startRecognition(for: .translating)
-            guard await bluetoothManager?.startMicrophone() == true else {
+            let microphoneStarted = await bluetoothManager?
+                .startMicrophone(preferredSide: preferredMicrophoneSide) == true
+            guard microphoneStarted else {
                 throw VoiceCoordinatorError.microphoneStartFailed
             }
             isTranslationActive = true
+            response = "Listening…"
+            bluetoothManager?.sendText(G1TextSendRequest(text: response, mode: .text))
             return true
         } catch {
             translationRunning = false
             mode = .failed(error.localizedDescription)
             isTranslationActive = false
+            bluetoothManager?.setCustomDisplaySurfaceClaimed(false)
             transcriber.cancel()
             _ = await bluetoothManager?.stopMicrophone()
             decoder?.discardPartialFrame()
@@ -101,18 +107,26 @@ final class GlassesVoiceCoordinator: ObservableObject {
         transcriber.cancel()
         _ = await bluetoothManager?.stopMicrophone()
         decoder?.discardPartialFrame()
+        _ = await bluetoothManager?.clearDisplayAndWait()
+        transcript = ""
+        response = ""
+        finalizedTranslationSource = nil
+        bluetoothManager?.setCustomDisplaySurfaceClaimed(false)
     }
 
     /// Claim the lens before TranslationSession downloads or prepares its
     /// languages, which can otherwise leave a stale bitmap visible for several
     /// seconds after the user enables captions.
-    func prepareDisplayForTranslation() async {
+    func prepareDisplayForTranslation(displayAlreadyCleared: Bool = false) async {
         if let bluetoothManager {
+            bluetoothManager.setCustomDisplaySurfaceClaimed(true)
             _ = await bluetoothManager.configureTiltDashboard(
                 G1TiltDashboardConfig(enabled: true, headUpMode: .off, appEventFallback: true)
             )
         }
-        _ = await bluetoothManager?.clearDisplayAndWait()
+        if !displayAlreadyCleared {
+            _ = await bluetoothManager?.clearDisplayAndWait()
+        }
         isTranslationDisplayPrepared = true
     }
 
@@ -120,7 +134,21 @@ final class GlassesVoiceCoordinator: ObservableObject {
         let trimmed = translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         response = trimmed
-        bluetoothManager?.sendText(G1TextSendRequest(text: trimmed, mode: .ai))
+        bluetoothManager?.sendText(G1TextSendRequest(text: trimmed, mode: .text))
+    }
+
+    func handleTranslationDisplayEvent(_ event: G1Event) -> Bool {
+        guard isTranslationActive else { return false }
+        switch event {
+        case .headUp:
+            let displayText = response.isEmpty ? "Listening…" : response
+            bluetoothManager?.sendText(G1TextSendRequest(text: displayText, mode: .text))
+            return true
+        case .headDown:
+            return true
+        default:
+            return false
+        }
     }
 
     private func beginAssistantCapture() async {
@@ -186,12 +214,19 @@ final class GlassesVoiceCoordinator: ObservableObject {
 
     private func startRecognition(for newMode: Mode) async throws {
         let locale = Locale(identifier: speechLocaleIdentifier)
+        if newMode == .translating {
+            finalizedTranslationSource = nil
+        }
         try await transcriber.start(locale: locale) { [weak self] text, isFinal in
             guard let self else { return }
             self.transcript = text
-            if newMode == .translating, isFinal, !text.isEmpty {
+            if newMode == .translating,
+               !text.isEmpty,
+               text != self.finalizedTranslationSource {
                 self.finalizedTranslationSource = text
                 self.translationRevision &+= 1
+            }
+            if newMode == .translating, isFinal, !text.isEmpty {
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(for: .milliseconds(150))
                     guard let self, self.translationRunning else { return }
@@ -215,6 +250,7 @@ final class GlassesVoiceCoordinator: ObservableObject {
         mode = .failed(message)
         if recognitionMode == .translating {
             isTranslationActive = false
+            bluetoothManager?.setCustomDisplaySurfaceClaimed(false)
         }
         _ = await bluetoothManager?.stopMicrophone()
         decoder?.discardPartialFrame()
@@ -246,6 +282,7 @@ final class GlassesVoiceCoordinator: ObservableObject {
         mode = .failed("Glasses audio decode failed.")
         if wasTranslating {
             isTranslationActive = false
+            bluetoothManager?.setCustomDisplaySurfaceClaimed(false)
         }
         transcriber.cancel()
         _ = await bluetoothManager?.stopMicrophone()

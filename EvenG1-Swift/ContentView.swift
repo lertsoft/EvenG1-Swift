@@ -12,6 +12,11 @@ struct ContentView: View {
     @EnvironmentObject var appActionRouter: AppActionRouter
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var developerSettings = DeveloperSettings()
+    @AppStorage(TranslationPreferences.sideButtonEnabledKey)
+    private var translationSideButtonEnabled = false
+    @AppStorage(TranslationPreferences.sideButtonDurationKey)
+    private var translationSideButtonDurationSeconds =
+        TranslationPreferences.defaultSideButtonDurationSeconds
 
     /// Owned here so transit state survives navigating between tabs.
     @StateObject private var transitViewModel = MTATrainViewModel()
@@ -25,6 +30,9 @@ struct ContentView: View {
     @State private var deviceTabEnabled = true
     @State private var navigateTabEnabled = true
     @State private var headsUpTabEnabled = true
+    @State private var translationStartRequested = false
+    @State private var translationStopInProgress = false
+    @State private var requestedFirmwareDoubleTapAction: UInt8?
 
     private var rumViewAttributes: [String: String] {
         var attributes = TelemetryBuildInfo.rumViewAttributes
@@ -61,12 +69,41 @@ struct ContentView: View {
                 guard phase == .active else { return }
                 Task { await processPendingAppAction() }
             }
+            .onChange(of: bluetoothManager.connectionState) { _, state in
+                if state == .fullyConnected {
+                    synchronizeFirmwareDoubleTapAction()
+                } else {
+                    requestedFirmwareDoubleTapAction = nil
+                }
+            }
+            .onChange(of: translationSideButtonEnabled) { _, _ in
+                synchronizeFirmwareDoubleTapAction()
+            }
+            .onChange(of: voiceCoordinator.translationStopRevision) { _, _ in
+                translationStartRequested = false
+            }
+            .onChange(of: voiceCoordinator.mode) { _, mode in
+                if case .failed = mode {
+                    translationStartRequested = false
+                }
+            }
+            .onChange(of: appActionRouter.translationStartCompletionRevision) { _, _ in
+                translationStartRequested = false
+            }
             .onChange(of: glassesEvents.revision) { _, _ in
                 guard let latestEvent = glassesEvents.latestEvent else {
                     return
                 }
 
                 routeGlassesEvent(latestEvent)
+            }
+            .onChange(of: appActionRouter.translationStartRevision) { _, revision in
+                guard revision > 0 else { return }
+                guard headsUpTabEnabled else {
+                    appActionRouter.completeTranslationStartRequest(revision: revision)
+                    return
+                }
+                selectedTab = 2
             }
     }
 
@@ -156,19 +193,43 @@ struct ContentView: View {
         notificationMirror.setNavigationSessionState(bluetoothManager.navigationSessionState)
         notificationMirror.setConnected(bluetoothManager.connectionState == .fullyConnected)
         syncTransitCatalogSubtitle()
+        synchronizeFirmwareDoubleTapAction()
         Task { await processPendingAppAction() }
     }
 
     /// Head gestures are the only events several features want at once, so they go
     /// to a single owner. Everything else keeps its previous routing.
     private func routeGlassesEvent(_ event: G1Event) {
-        // Translation owns press-and-hold while its screen is foregrounded.
-        if case .pressAndHold = event, appActionRouter.isTranslationForeground {
-            appActionRouter.requestTranslationStart()
-            return
+        if translationSideButtonEnabled {
+            switch event {
+            case .actionDoubleTap:
+                if voiceCoordinator.isTranslationActive {
+                    stopTranslationFromGlasses()
+                } else {
+                    guard !translationStartRequested,
+                          !translationStopInProgress else { return }
+                    translationStartRequested = true
+                    startTranslationFromGlasses()
+                }
+                return
+            case .doubleTap:
+                guard voiceCoordinator.isTranslationActive || translationStopInProgress else {
+                    break
+                }
+                stopTranslationFromGlasses()
+                return
+            default:
+                break
+            }
         }
 
         if G1LensSurfaceArbiter.isContendedGesture(event) {
+            // Live captions keep ownership of the single lens surface. Head-up
+            // reasserts the latest caption after a firmware display timeout.
+            if voiceCoordinator.handleTranslationDisplayEvent(event) {
+                return
+            }
+
             let owner = G1LensSurfaceArbiter.headGestureOwner(
                 navigationSessionState: bluetoothManager.navigationSessionState,
                 isNotificationMirrorEligible: notificationMirror.isEligibleForHeadGestures,
@@ -196,6 +257,65 @@ struct ContentView: View {
             let consumed = await voiceCoordinator.handleGlassesEvent(event)
             if !consumed {
                 await transitViewModel.handleGlassesEvent(event)
+            }
+        }
+    }
+
+    private func startTranslationFromGlasses() {
+        let autoStopSeconds = translationSideButtonDurationSeconds > 0
+            ? translationSideButtonDurationSeconds
+            : nil
+        Task { @MainActor in
+            _ = await bluetoothManager.clearDisplayAndWait()
+            guard translationSideButtonEnabled else {
+                translationStartRequested = false
+                return
+            }
+            appActionRouter.requestTranslationStart(
+                autoStopAfterSeconds: autoStopSeconds,
+                fromSideButton: true
+            )
+        }
+    }
+
+    private func stopTranslationFromGlasses() {
+        guard !translationStopInProgress else { return }
+        translationStopInProgress = true
+        translationStartRequested = false
+        Task { @MainActor in
+            await voiceCoordinator.stopTranslation()
+            translationStopInProgress = false
+        }
+    }
+
+    private func synchronizeFirmwareDoubleTapAction() {
+        guard bluetoothManager.connectionState == .fullyConnected else {
+            requestedFirmwareDoubleTapAction = nil
+            return
+        }
+        let action: UInt8 = translationSideButtonEnabled ? 0x02 : 0x00
+        guard requestedFirmwareDoubleTapAction != action else {
+            return
+        }
+        requestedFirmwareDoubleTapAction = action
+        Task { @MainActor in
+            for attempt in 0..<3 {
+                guard bluetoothManager.connectionState == .fullyConnected,
+                      (translationSideButtonEnabled ? UInt8(0x02) : UInt8(0x00)) == action else {
+                    return
+                }
+
+                if await bluetoothManager.setFirmwareDoubleTapAction(action) {
+                    return
+                }
+
+                if attempt < 2 {
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
+            }
+
+            if requestedFirmwareDoubleTapAction == action {
+                requestedFirmwareDoubleTapAction = nil
             }
         }
     }
