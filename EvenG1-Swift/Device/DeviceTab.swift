@@ -169,6 +169,18 @@ private struct ConnectCard: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .accessibilityIdentifier("device.connectButton")
+
+                if bluetoothManager.hasRememberedGlasses {
+                    Button {
+                        bluetoothManager.forgetRememberedGlassesAndScan()
+                    } label: {
+                        Label("Scan for a new pair", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .accessibilityIdentifier("device.freshScanButton")
+                }
             }
 
             if bluetoothManager.discoveredPairs.isEmpty {

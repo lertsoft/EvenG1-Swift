@@ -85,9 +85,17 @@ final class G1DashboardCommandTests: XCTestCase {
         XCTAssertEqual(hideDecision, false)
     }
 
-    func testParserMapsAlternateHeadCodesToHeadEvents() {
+    func testParserMapsPrimaryAndDashboardStateHeadCodesToHeadEvents() {
         let parser = G1FrameParser()
 
+        let primaryUpFrame = parser.parseFrame(
+            data: Data([G1Command.DEVICE_EVENT.rawValue, G1DeviceEvent.HEAD_UP_PRIMARY.rawValue]),
+            side: .right
+        )
+        let primaryDownFrame = parser.parseFrame(
+            data: Data([G1Command.DEVICE_EVENT.rawValue, G1DeviceEvent.HEAD_DOWN_PRIMARY.rawValue]),
+            side: .right
+        )
         let upFrame = parser.parseFrame(
             data: Data([G1Command.DEVICE_EVENT.rawValue, G1DeviceEvent.HEAD_UP_ALT.rawValue]),
             side: .left
@@ -97,6 +105,12 @@ final class G1DashboardCommandTests: XCTestCase {
             side: .right
         )
 
+        guard case .headUp? = parser.parseEvent(from: primaryUpFrame) else {
+            return XCTFail("Expected primary head-up code to map to .headUp")
+        }
+        guard case .headDown? = parser.parseEvent(from: primaryDownFrame) else {
+            return XCTFail("Expected primary head-down code to map to .headDown")
+        }
         guard case .headUp? = parser.parseEvent(from: upFrame) else {
             return XCTFail("Expected alt head-up code to map to .headUp")
         }

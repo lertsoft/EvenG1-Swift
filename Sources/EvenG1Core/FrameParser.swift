@@ -156,8 +156,8 @@ public final class G1FrameParser: @unchecked Sendable {
             // ACK-only configuration response; no user-facing event.
             return nil
 
-        case .HEARTBEAT:
-            // Heartbeat response - typically filtered
+        case .HEARTBEAT, .VENDOR_CONFIG:
+            // Heartbeat and chunked vendor config are handled elsewhere.
             return nil
 
         case .HEAD_UP_ANGLE, .DASHBOARD_LAYOUT, .DASHBOARD_SHOW, .DISPLAY_SETTINGS:
@@ -241,10 +241,10 @@ public final class G1FrameParser: @unchecked Sendable {
             return .singleTap
         case G1DeviceEvent.DOUBLE_TAP.rawValue:
             return .doubleTap
-        case G1DeviceEvent.SWIPE_FORWARD.rawValue:
-            return .swipeForward
-        case G1DeviceEvent.SWIPE_BACKWARD.rawValue:
-            return .swipeBackward
+        case G1DeviceEvent.HEAD_UP_PRIMARY.rawValue:
+            return .headUp
+        case G1DeviceEvent.HEAD_DOWN_PRIMARY.rawValue:
+            return .headDown
         case G1DeviceEvent.PRESS_AND_HOLD.rawValue:
             return .pressAndHold
         case G1DeviceEvent.PRESS_AND_RELEASE.rawValue:

@@ -321,7 +321,7 @@ final class NotificationMirrorViewModel: ObservableObject {
                 statusMessage = "Could not render the notification icon."
                 return
             }
-            _ = await bluetoothManager.sendBitmap(frame)
+            _ = await bluetoothManager.sendBitmap(frame, latchOwner: .notificationMirror)
         case .text(let notification):
             guard isEnabled, isAppActive, !isNavigationOwningDisplay else { return }
             // Awaited so a following clear cannot win the display gate first.

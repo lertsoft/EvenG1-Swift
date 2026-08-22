@@ -5,6 +5,9 @@ debugging navigation head-up and display ownership. Every entry below is backed
 by NDJSON runtime logs from device sessions; the "confidence" column separates
 what the logs prove from what remains inference.
 
+For the complete custom-dashboard investigation and final implementation, see
+[`CUSTOM_DASHBOARD_TROUBLESHOOTING.md`](CUSTOM_DASHBOARD_TROUBLESHOOTING.md).
+
 ## 0xF5 device event codes
 
 The firmware sends notifications as `0xF5 <code> <value> <18 zero bytes>`. Codes
@@ -13,6 +16,8 @@ the app maps (tap/swipe/head) are in `G1DeviceEvent`. Codes observed as
 
 | Code | Observed values | Meaning | Confidence |
 | --- | --- | --- | --- |
+| `0x02` | `00` | primary head-up motion event on tested firmware | verified |
+| `0x03` | `00` | primary head-down/return-to-level motion event on tested firmware | verified |
 | `0x07` | `00` | display/dashboard surface state, reported single-arm | inferred |
 | `0x08` | `00` | wear or case state change, always a left+right pair | inferred |
 | `0x09` | `01` | wear or case state change, always a left+right pair | inferred |
@@ -25,34 +30,34 @@ They are lifecycle notifications, not Even AI.
 
 `0x0A` frames were initially mistaken for a pitch-angle channel. A run with
 timed, labelled head tilts disproved that: the frames arrive as part of a
-periodic `0A`/`09`/`0E` triplet unrelated to head movement, while the deliberate
-tilt produced a real `F5 1E` head-up pair instead. Head-up is the discrete event,
-not an angle threshold.
+periodic `0A`/`09`/`0E` triplet unrelated to head movement. Deliberate tilts
+produce discrete `0xF5` events rather than a continuous angle channel; the final
+firmware traces established `F5 02`/`F5 03` as the primary pair.
 
-Head events arrive as `F5 1E` (up) and `F5 1F` (down), one frame per arm, the
-pair landing within about 200 ms. The firmware sends its own head-down roughly
-500-700 ms after each head-up, which is genuine `0xF5` traffic rather than a
-parsing artifact, so the dwell timer is required. Verified working: a head-up at
-one timestamp logged `head-down ignored during overview hold` 500 ms later with
-7.5 s remaining, uploaded the overview, and auto-returned to the head-level map
-about 8 s later.
+The successful custom-dashboard runs used `F5 02` for head-up and `F5 03` for
+head-down, primarily from the right arm. Earlier sessions also observed
+`F5 1E`/`F5 1F` around firmware dashboard transitions. Those alternate codes
+must not be assumed to be the only physical motion source across firmware
+versions.
 
-## Head-up is firmware-owned, and turning it off costs the event
+The firmware can emit `F5 03` within roughly 0.5-3.0 seconds of head-up while a
+bitmap is still uploading. This is genuine device traffic, not a parsing
+artifact, so the dashboard ignores head-down for 3.5 seconds after an accepted
+head-up.
 
-Two separate device sessions establish the trade-off:
+## Head-up mode and head-up action are separate
 
-- With firmware head-up left at its default, `headUp` events arrive, but the
-  firmware draws its own dashboard over the custom bitmap and dismisses it after
-  roughly one second, emitting a `headDown` the app then acts on. Eight `headUp`
-  events in one session, each followed by a `headDown` about 1 s later.
-- After the app set head-up mode to off (intending to own the surface), the
-  session logged **zero** `headUp` events against four `headDown` events across
-  four deliberate 3-10 s tilts. Suppressing the feature suppresses its event, so
-  the app can no longer detect the tilt at all.
+Two controls that initially appeared equivalent have materially different
+behavior:
 
-Conclusion: do not disable firmware head-up mode to win the display. Let the
-event arrive and absorb the firmware's fast `headDown` with a dwell timer
-(`overviewHoldUntil`) instead.
+- Head-up **mode** uses `0x0A`/`0x0B`. Setting the mode to off can suppress the
+  `headUp` event itself, preventing the app from detecting the gesture.
+- Head-up **action** uses `0x08`. Mapping the action to `None` with
+  `08 06 00 00 03 02` suppresses firmware UI while preserving `F5 02`.
+
+Conclusion: never disable the mode to win the display. Keep `0x0A`/`0x0B`
+globally suppressed and map only the firmware action to `None` while the custom
+dashboard is enabled.
 
 ## The head-up mode command is expensive on this firmware
 
@@ -76,43 +81,85 @@ send text.
 
 ## Even AI prompt
 
-The "release to finish recording Even AI" overlay is firmware UI, and no
-incoming event announces it. The mic command bytes (`0x0E` primary,
-`G1Command.MIC_ON` fallback) are never sent by this app, and the `0x0E`
-notifications received are case/charge lifecycle frames, not recording state.
+The “release to finish recording Even AI” overlay is firmware UI, not app text.
+Sending `0x0A`/`0x0B` was one way to provoke it and remains forbidden.
 
-Confirmed cause: the app's own head-up mode probe. The prompt appeared during
-the initial load of every session that sent `0x0A`/`0x0B` at startup, and the
-session after that probe was removed showed no prompt at all, including when the
-side button was pressed. Do not send head-up mode commands on this firmware.
+The residual intermittent prompt was caused by the firmware action still
+assigned to head-up. After both arms acknowledged `08 06 00 00 03 02`, repeated
+head-up cycles showed no Even AI or stock dashboard while `F5 02` continued.
 
-Note that `pressAndHold` currently maps to "end navigation", which collides with
-the stock Even AI gesture. Consider remapping.
+`F5 12` was correlated with one earlier prompt and was instrumented as a
+possible cause. It later appeared after action suppression without producing
+any overlay, proving that the event alone is not sufficient to open Even AI.
 
-## Spurious gesture events
+## Firmware dashboard override strategy (2026-08)
 
-Two consecutive sessions each logged exactly 13 `swipeForward` and 13
-`swipeBackward` events, plus `doubleTap` and head events, at times the wearer
-was not touching the glasses. In the second session the wearer deliberately
-touched nothing for a minute and the events kept arriving, alternating direction
-at regular intervals. They also arrive interleaved with bitmap upload traffic.
+The stock Even Realities firmware renders its own lens UI on head-up: the native
+dashboard, navigation status such as “your route is being generated,” and the
+Even AI recording prompt. These strings are **not** produced by this app.
 
-Each one forces a step preview, a re-render, and a BLE upload, which is why the
-instruction line appeared to change on its own while the map stayed still: the
-phantom swipes were cycling through step previews.
+Final verified strategy:
 
-Not a parsing artifact. Frame-level logging shows each one arriving as a clean
-`F5 02` or `F5 03` from the right arm only, so the firmware itself reports them.
-Across 19 consecutive pairs the direction alternated perfectly, forward then
-backward every time, with gaps from 0.2 s to 35 s. Perfect alternation over that
-many pairs is not human input; `0x02`/`0x03` behave like a two-state toggle
-report on this firmware rather than directional swipes.
+1. When the dashboard is enabled and both arms are connected, map head-up action
+   to `None` with `08 06 00 00 03 02`.
+2. Preserve raw `F5 02`/`F5 03` motion events.
+3. On head-up, send `0x18` and await both arms to remove any residual firmware
+   surface.
+4. Render a current snapshot and upload it without sending `0x07 01`.
+5. Ignore firmware follow-up head-down events for 3.5 seconds.
+6. On a later intentional head-down, send `0x18` to clear the custom frame.
+7. When the custom dashboard is disabled, restore the default firmware action
+   with `08 06 00 00 03 00`.
 
-Navigation therefore ignores swipe events entirely and step previews stay on the
-phone. `G1FrameParser.parseStatusResponse` remains a latent hazard worth
-tightening: it scans a `0x22` payload for a stray `0xF5` byte and otherwise
-treats `payload[0]` as an event code, which can fabricate gestures from status
-data.
+Pre-latching was useful as an experiment but was not sufficient as the final
+strategy: any later `0x18` invalidates the stored frame, and `0x07 01` gives the
+firmware dashboard layer ownership again. The verified path uploads directly
+after the head-up clear and completes in about one second.
+
+### Power-cycle isolation test
+
+To determine whether firmware messages persist across sessions:
+
+1. Fully power-cycle the glasses (case closed until LEDs indicate off).
+2. Launch **only** this app; do not open the official Even Realities app.
+3. Head-up before opening the Dashboard screen.
+
+If stock firmware UI still appears, inspect the stored firmware head-up action
+and apply the `0x08 ... 0x02` mapping before the first head-up. If it is absent
+until a specific app action, trace that action in BLE logs.
+
+## Inbound `0xF6` vendor configuration channel
+
+Observed chunked JSON on command `0xF6` with sub-type `0x06`:
+
+- Wire format: `F6 06 <chunkIndex> <utf8-json-bytes...>`
+- Example payload decodes to whitelist registration JSON such as
+  `{"whitelist_add": {"application_identifier": "...", "display_name": "..."}}`
+- Previously logged as `Unknown cmd=0xF6`; now reassembled in
+  `G1VendorConfigReassembler`.
+
+Status: **reassembled in memory**; no outbound control documented yet.
+
+## Experimental dashboard layout (`0x06`)
+
+Community docs place dashboard layout on command `0x06` alongside visibility `0x07`.
+`experimentalSendMinimalDashboardLayout()` sends `06 00` for manual hardware trials.
+Not invoked automatically; effectiveness unverified.
+
+## Corrected interpretation of `F5 02` and `F5 03`
+
+These codes were initially mapped as `swipeForward` and `swipeBackward`, which
+made alternating head-state traffic look like phantom swipes. Reproduction with
+labelled physical movement established their actual role on the tested
+firmware:
+
+- `F5 02` starts the head-up dashboard flow.
+- `F5 03` reports return to level/head-down.
+
+They must not drive navigation step previews. `G1FrameParser.parseStatusResponse`
+remains a latent hazard worth tightening: it scans a `0x22` payload for a stray
+`0xF5` byte and otherwise treats `payload[0]` as an event code, which can
+fabricate gestures from status data.
 
 ## Frame freshness on the glasses
 

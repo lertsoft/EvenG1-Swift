@@ -188,4 +188,8 @@ back to scanning when no pair is remembered.
 - [Socrata paging documentation](https://dev.socrata.com/docs/paging.html) for explicit Open Data query ordering and limits
 - [GTFS Realtime reference](https://gtfs.org/documentation/realtime/reference/) and [SwiftProtobuf](https://github.com/apple/swift-protobuf)
 
-See `RESEARCH/PROTOCOL_NOTES.md` for byte-level notes and `RESEARCH/NAVIGATION_VALIDATION_MATRIX.md` for the remaining hardware checks.
+See [`RESEARCH/PROTOCOL_NOTES.md`](RESEARCH/PROTOCOL_NOTES.md) for byte-level
+notes, [`RESEARCH/CUSTOM_DASHBOARD_TROUBLESHOOTING.md`](RESEARCH/CUSTOM_DASHBOARD_TROUBLESHOOTING.md)
+for the verified stock-dashboard/Even AI investigation, and
+[`RESEARCH/NAVIGATION_VALIDATION_MATRIX.md`](RESEARCH/NAVIGATION_VALIDATION_MATRIX.md)
+for the remaining hardware checks.

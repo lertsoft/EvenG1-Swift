@@ -71,10 +71,15 @@ public enum G1Command: UInt8 {
     
     // Events (received from glasses)
     case DEVICE_EVENT = 0xF5
+    /// Chunked JSON configuration channel (whitelist, app registry, etc.).
+    case VENDOR_CONFIG = 0xF6
 }
 
 /// Compatibility command IDs observed across firmware and community implementations.
 public enum G1CompatibilityCommand {
+    /// Android's initial pairing/setup command, used as an unbonded fallback.
+    public static let androidInit: UInt8 = 0xF4
+
     /// Brightness command used by official mappings.
     public static let brightnessV2: UInt8 = G1Command.BRIGHTNESS_V2.rawValue
     /// Brightness command used by legacy mappings.
@@ -84,6 +89,8 @@ public enum G1CompatibilityCommand {
     public static let headUpMode: UInt8 = G1Command.HEAD_UP_ANGLE.rawValue
     /// Alternate head-up behavior command seen on some firmware.
     public static let headUpModeAlt: UInt8 = 0x0B
+    /// Maps the firmware action performed after a head-up motion.
+    public static let headUpAction: UInt8 = 0x08
     /// Dashboard visibility command.
     public static let dashboardVisibility: UInt8 = G1Command.DASHBOARD_SHOW.rawValue
 
@@ -100,8 +107,10 @@ public enum G1CompatibilityCommand {
 public enum G1DeviceEvent: UInt8 {
     case DOUBLE_TAP = 0x00
     case SINGLE_TAP = 0x01
-    case SWIPE_FORWARD = 0x02
-    case SWIPE_BACKWARD = 0x03
+    /// Primary right-arm head-motion event.
+    case HEAD_UP_PRIMARY = 0x02
+    /// Primary right-arm return-to-level event.
+    case HEAD_DOWN_PRIMARY = 0x03
     case TRIPLE_TAP = 0x04
     case TRIPLE_TAP_ALT = 0x05
     

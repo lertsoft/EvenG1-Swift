@@ -462,7 +462,7 @@ final class MTATrainViewModel: ObservableObject {
         }
         currentVisualImage = rendered.image
 
-        let sent = await bluetoothManager?.sendBitmap(rendered.frame) ?? false
+        let sent = await bluetoothManager?.sendBitmap(rendered.frame, latchOwner: .transit) ?? false
         guard isWidgetActive,
               generation == bitmapRenderGeneration,
               pageIndex == currentPageIndex else {

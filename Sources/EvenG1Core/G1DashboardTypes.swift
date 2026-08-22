@@ -32,6 +32,17 @@ public struct G1TiltDashboardConfig: Sendable, Equatable {
     }
 }
 
+/// Which app feature last uploaded a bitmap that remains latched in glasses memory.
+public enum G1LatchedDisplayOwner: String, Sendable, Equatable {
+    case none
+    case dashboard
+    case navigation
+    case transit
+    case notificationMirror
+    case translation
+    case other
+}
+
 /// Vendor-documented raster position controls. The user-facing distance is
 /// zero-based (0...8); the wire protocol encodes it as 1...9.
 public struct G1DisplayPositionSettings: Sendable, Equatable {

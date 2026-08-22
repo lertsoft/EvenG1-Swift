@@ -142,10 +142,18 @@ Source examples:
 ## 9) Dashboard / Hardware / Navigation Commands Seen In Practice
 
 - Dashboard layout/show families: `0x06`, `0x07`
+- Head-up action mapping: `0x08 0x06 0x00 0x00 0x03 <action>`
+  - `action=0x02`: no firmware UI action; preserves `F5 02` motion events
+  - `action=0x00`: restore the default firmware action
 - Head-up behavior/angle: `0x0A` / `0x0B` (firmware-dependent)
+  - On the tested mid-2026 firmware these commands are slow, can trigger Even
+    AI, and mode-off can suppress motion events. The custom dashboard globally
+    blocks them and uses `0x08` instead.
 - Silent mode: `0x03`
 - Raster/display position settings: `0x26` (length, sequence, action, enable, height, distance)
-- Experimental navigation packets currently use `0x0A`; this payload family is inferred and remains hardware-gated, not vendor-documented
+- Legacy experimental navigation packets used `0x0A`; this inferred payload
+  family remains hardware-gated and must not be enabled on the verified
+  dashboard path.
 
 Source examples:
 - `MentraOS-main/mobile/modules/core/ios/Source/sgcs/G1.swift`

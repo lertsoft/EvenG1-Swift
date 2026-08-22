@@ -1091,7 +1091,7 @@ final class NavigationViewModel: ObservableObject {
             return false
         }
 
-        let sent = await bluetoothManager.sendBitmap(frame)
+        let sent = await bluetoothManager.sendBitmap(frame, latchOwner: .navigation)
         if sent {
             DatadogTelemetryService.shared.trackAction(
                 type: .custom,

@@ -6,13 +6,10 @@ import UIKit
 /// Owns dashboard state and drives head-up display.
 ///
 /// Design notes tied to the plan's hardware findings:
-/// - Head-up sends a *pre-rendered cached frame*; no network/location work runs
-///   on the tilt path.
-/// - The firmware emits a fast `headDown` ~500-700 ms after `headUp`; a dwell
-///   window suppresses that so the dashboard is not cleared immediately.
-/// - Duplicate `headUp` frames (one per arm, ~200 ms apart) are coalesced.
+/// - Duplicate `headUp`/`headDown` frames (one per arm, ~200 ms apart) are coalesced.
 /// - Ownership is rechecked immediately before the BLE send so a queued
 ///   dashboard upload cannot overwrite navigation that started in between.
+/// - Head-up mode commands (`0x0A`/`0x0B`) are never sent; they trigger Even AI.
 @MainActor
 final class DashboardViewModel: ObservableObject {
     @Published private(set) var previewImage: UIImage?
@@ -30,32 +27,77 @@ final class DashboardViewModel: ObservableObject {
     private var sendGeneration: UInt64 = 0
 
     private var lastHeadUpAt: Date?
-    private var dwellUntil: Date?
+    private var lastHeadDownAt: Date?
     private let headUpDebounceSeconds: TimeInterval = 1.0
-    private let dwellSeconds: TimeInterval = 8.0
+    private let headDownDebounceSeconds: TimeInterval = 1.0
+    private let headDownDwellAfterHeadUpSeconds: TimeInterval = 3.5
 
     private var cancellables = Set<AnyCancellable>()
+    private var connectionCancellable: AnyCancellable?
+    private var requestedFirmwareHeadUpSuppression: Bool?
+    private var firmwareHeadUpConfigurationGeneration: UInt64 = 0
 
     init(settingsStore: DashboardSettingsStore = DashboardSettingsStore()) {
         self.settingsStore = settingsStore
         refreshSnapshot()
 
-        // Re-render the cached frame whenever configuration changes so the
-        // preview and the next head-up upload reflect the latest settings.
         settingsStore.$settings
-            .sink { [weak self] _ in
+            .sink { [weak self] settings in
                 guard let self else { return }
                 self.refreshSnapshot()
+                self.synchronizeFirmwareHeadUpAction(suppressed: settings.isEnabled)
             }
             .store(in: &cancellables)
     }
 
     func bind(bluetoothManager: G1BluetoothManager) {
         self.bluetoothManager = bluetoothManager
+        connectionCancellable = bluetoothManager.$connectionState
+            .removeDuplicates()
+            .sink { [weak self] state in
+                guard let self else { return }
+                if state == .fullyConnected {
+                    self.synchronizeFirmwareHeadUpAction(
+                        suppressed: self.settingsStore.settings.isEnabled
+                    )
+                } else {
+                    self.requestedFirmwareHeadUpSuppression = nil
+                }
+            }
+        synchronizeFirmwareHeadUpAction(suppressed: settingsStore.settings.isEnabled)
     }
 
     var isEnabled: Bool {
         settingsStore.settings.isEnabled
+    }
+
+    private func synchronizeFirmwareHeadUpAction(suppressed: Bool) {
+        guard let bluetoothManager,
+              bluetoothManager.connectionState == .fullyConnected else {
+            requestedFirmwareHeadUpSuppression = nil
+            return
+        }
+        guard requestedFirmwareHeadUpSuppression != suppressed else { return }
+
+        requestedFirmwareHeadUpSuppression = suppressed
+        firmwareHeadUpConfigurationGeneration &+= 1
+        let generation = firmwareHeadUpConfigurationGeneration
+
+        Task { [weak self, weak bluetoothManager] in
+            guard let self, let bluetoothManager else { return }
+            let acknowledged = await bluetoothManager
+                .setFirmwareHeadUpActionSuppressed(suppressed)
+            guard generation == self.firmwareHeadUpConfigurationGeneration else {
+                self.requestedFirmwareHeadUpSuppression = nil
+                self.synchronizeFirmwareHeadUpAction(
+                    suppressed: self.settingsStore.settings.isEnabled
+                )
+                return
+            }
+            if !acknowledged {
+                self.requestedFirmwareHeadUpSuppression = nil
+            }
+        }
     }
 
     // MARK: - Snapshot / rendering
@@ -114,18 +156,29 @@ final class DashboardViewModel: ObservableObject {
         case .headUp:
             let now = Date()
             if let lastHeadUpAt, now.timeIntervalSince(lastHeadUpAt) < headUpDebounceSeconds {
-                return // Coalesce the second arm's duplicate frame.
-            }
-            lastHeadUpAt = now
-            dwellUntil = now.addingTimeInterval(dwellSeconds)
-            await sendCachedFrame()
-
-        case .headDown:
-            // Ignore the firmware's fast head-down during the dwell window.
-            if let dwellUntil, Date() < dwellUntil {
                 return
             }
-            bluetoothManager?.clearDisplay()
+            lastHeadUpAt = now
+
+            let stockLayerCleared = await bluetoothManager?.clearDisplayAwaitingCompletion() ?? false
+            guard stockLayerCleared else { return }
+
+            refreshSnapshot(referenceDate: now)
+            _ = await sendCachedFrame(caller: "headUp")
+
+        case .headDown:
+            let now = Date()
+            let deltaSinceHeadUp = lastHeadUpAt.map { now.timeIntervalSince($0) }
+            let isFirmwareFollowUp = (deltaSinceHeadUp ?? .greatestFiniteMagnitude) < headDownDwellAfterHeadUpSeconds
+            if isFirmwareFollowUp {
+                return
+            }
+
+            if let lastHeadDownAt, now.timeIntervalSince(lastHeadDownAt) < headDownDebounceSeconds {
+                return
+            }
+            lastHeadDownAt = now
+            _ = await bluetoothManager?.clearDisplayAwaitingCompletion()
 
         default:
             return
@@ -136,27 +189,29 @@ final class DashboardViewModel: ObservableObject {
     /// screen's send button and by the feasibility spike).
     func sendNow() async {
         guard ownershipAvailable() else { return }
-        await sendCachedFrame()
+        _ = await sendCachedFrame(caller: "sendNow")
     }
 
     private func ownershipAvailable() -> Bool {
         guard let bluetoothManager else { return false }
-        // Navigation owns the surface during a trip.
         return bluetoothManager.navigationSessionState == .inactive
     }
 
-    private func sendCachedFrame() async {
-        guard let bluetoothManager, let frame = cachedFrame else { return }
-        guard bluetoothManager.connectionState == .fullyConnected else { return }
+    private func sendCachedFrame(caller: String) async -> Bool {
+        guard let bluetoothManager, let frame = cachedFrame else { return false }
+        guard bluetoothManager.connectionState == .fullyConnected else { return false }
 
         sendGeneration &+= 1
         let generation = sendGeneration
 
-        // Recheck ownership right before sending: navigation may have started
-        // between the head-up event and now.
-        guard ownershipAvailable() else { return }
-        guard generation == sendGeneration else { return }
+        guard ownershipAvailable() else { return false }
+        guard generation == sendGeneration else { return false }
 
-        _ = await bluetoothManager.sendBitmap(frame)
+        let sent = await bluetoothManager.sendBitmap(
+            frame,
+            latchOwner: .dashboard,
+            showDashboardBeforeUpload: caller != "headUp"
+        )
+        return sent
     }
 }

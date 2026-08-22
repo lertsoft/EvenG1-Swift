@@ -137,6 +137,11 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     
     // MARK: - Configuration
     
+    /// When false, suppresses all outbound `0x0A`/`0x0B` head-up mode probes.
+    /// Verified on mid-2026 firmware: these probes trigger the Even AI overlay and
+    /// burn ~6 s of BLE time before the `0x0B` fallback ACKs.
+    public static var headUpModeCommandsEnabled: Bool = false
+
     /// Enable automatic reconnection on disconnect
     public var autoReconnect: Bool = true
 
@@ -236,6 +241,12 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     private let ackCommandGate = G1AsyncGate()
     private let navigationCommandGate = G1AsyncGate()
     private let displayCommandGate = G1AsyncGate()
+    private let vendorConfigReassembler = G1VendorConfigReassembler()
+
+    /// Pixel rows of the last successful bitmap upload still held in glasses memory.
+    private var latchedBitmapRows: Data?
+    private var latchedDisplayOwner: G1LatchedDisplayOwner = .none
+    private(set) var headUpModeCommandsSuppressedCount: Int = 0
     private var pendingWrites: [GlassesSide: PendingWriteQueue] = [
         .left: PendingWriteQueue(),
         .right: PendingWriteQueue()
@@ -249,6 +260,8 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     private var shouldReconnectAfterCentralRecovery: Bool = false
     private var isReconnecting: Bool = false
     private var hasAttemptedLaunchReconnect: Bool = false
+    private var bondBootstrapSides: Set<GlassesSide> = []
+    private var bondBootstrapRetryPerformed = false
 
     /// Dashboard fallback debounce for event-driven show/hide.
     private var lastDashboardFallbackActionAt: Date?
@@ -397,6 +410,10 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             log("Cannot connect: Pair incomplete (need both L and R)", level: .warning)
             return
         }
+        guard connectionState == .disconnected || connectionState == .scanning else {
+            log("Ignoring duplicate connect request while \(connectionState.displayString.lowercased())", level: .warning)
+            return
+        }
         
         stopScanning()
         isIntentionalDisconnect = false
@@ -456,6 +473,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         connectionState = .disconnected
         isDashboardVisible = false
         isCustomDisplaySurfaceClaimed = false
+        invalidateLatchedBitmap(reason: "disconnect")
         displayPositionSettings = nil
         activeMicrophoneSide = nil
         microphoneState = .idle
@@ -536,6 +554,74 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         }
 
         return true
+    }
+
+    /// Send one command to both arms and await both ACKs concurrently.
+    ///
+    /// `sendCommandAwaitAck` walks the sides sequentially, so a slow arm makes the
+    /// caller pay L+R round-trips. Pending ACKs are keyed by `(side, command,
+    /// sequence)`, so the two arms never collide; issuing both writes under a single
+    /// gate acquisition and awaiting them together makes the round-trips overlap,
+    /// bounding the wait at the slower arm rather than their sum.
+    private func sendCommandAwaitAckBothSidesConcurrently(
+        _ data: Data,
+        sequence: UInt8? = nil,
+        timeoutMs: Int = G1BLEConstants.commandTimeoutMs
+    ) async -> Bool {
+        guard await ackCommandGate.acquire(), !Task.isCancelled else { return false }
+        defer { ackCommandGate.release() }
+
+        guard let glasses = connectedGlasses else {
+            log("Cannot send with ACK: Not connected", level: .warning)
+            return false
+        }
+
+        let command = data.first ?? 0x00
+        async let leftAck = writeAndAwaitAck(
+            data,
+            command: command,
+            sequence: sequence,
+            to: glasses.leftPeripheral,
+            using: glasses.leftTXCharacteristic,
+            side: .left,
+            timeoutMs: timeoutMs
+        )
+        async let rightAck = writeAndAwaitAck(
+            data,
+            command: command,
+            sequence: sequence,
+            to: glasses.rightPeripheral,
+            using: glasses.rightTXCharacteristic,
+            side: .right,
+            timeoutMs: timeoutMs
+        )
+        let (initialLeft, initialRight) = await (leftAck, rightAck)
+        var left = initialLeft
+        var right = initialRight
+
+        if !left || !right {
+            async let leftRetry = left ? true : writeAndAwaitAck(
+                data,
+                command: command,
+                sequence: sequence,
+                to: glasses.leftPeripheral,
+                using: glasses.leftTXCharacteristic,
+                side: .left,
+                timeoutMs: timeoutMs
+            )
+            async let rightRetry = right ? true : writeAndAwaitAck(
+                data,
+                command: command,
+                sequence: sequence,
+                to: glasses.rightPeripheral,
+                using: glasses.rightTXCharacteristic,
+                side: .right,
+                timeoutMs: timeoutMs
+            )
+            (left, right) = await (leftRetry, rightRetry)
+        }
+
+        return left && right
     }
 
     nonisolated static func ackSendOrder(for side: GlassesSide?) -> [GlassesSide] {
@@ -651,6 +737,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
     nonisolated static func routesAck(for command: UInt8) -> Bool {
         switch command {
         case G1Command.INIT.rawValue,
+             G1CompatibilityCommand.androidInit,
              G1Command.HEARTBEAT.rawValue,
              G1CompatibilityCommand.brightnessV2,
              G1CompatibilityCommand.brightnessLegacy,
@@ -659,6 +746,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
              G1CompatibilityCommand.dashboardVisibility,
              G1CompatibilityCommand.headUpMode,
              G1CompatibilityCommand.headUpModeAlt,
+             G1CompatibilityCommand.headUpAction,
              G1CompatibilityCommand.microphonePrimary,
              G1CompatibilityCommand.microphoneFallback,
              G1CompatibilityCommand.navigationPrimary,
@@ -750,14 +838,45 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             }
         }
 
+        invalidateLatchedBitmap(reason: "sendText")
         return true
+    }
+
+    // MARK: - Latched bitmap tracking
+
+    /// Whether the given frame is already held in glasses memory for the owner.
+    public func isBitmapLatched(_ frame: G1BitmapFrame, owner: G1LatchedDisplayOwner) -> Bool {
+        guard latchedDisplayOwner == owner,
+              let latchedBitmapRows,
+              latchedBitmapRows == frame.bitPackedRows else {
+            return false
+        }
+        return true
+    }
+
+    /// Owner of the bitmap currently latched in glasses memory, if any.
+    public var currentLatchedDisplayOwner: G1LatchedDisplayOwner {
+        latchedDisplayOwner
+    }
+
+    private func recordLatchedBitmap(_ frame: G1BitmapFrame, owner: G1LatchedDisplayOwner) {
+        latchedBitmapRows = frame.bitPackedRows
+        latchedDisplayOwner = owner
+    }
+
+    private func invalidateLatchedBitmap(reason _: String) {
+        guard latchedDisplayOwner != .none else { return }
+        latchedBitmapRows = nil
+        latchedDisplayOwner = .none
     }
 
     /// Send a full bitmap frame using BMP upload commands, then finalize with end + CRC.
     @discardableResult
     public func sendBitmap(_ frame: G1BitmapFrame,
                            awaitChunkAck: Bool = false,
-                           interPacketDelayMs: UInt64 = 8) async -> Bool {
+                           interPacketDelayMs: UInt64 = 8,
+                           latchOwner: G1LatchedDisplayOwner = .other,
+                           showDashboardBeforeUpload: Bool = true) async -> Bool {
         guard await displayCommandGate.acquire(), !Task.isCancelled else { return false }
         defer { displayCommandGate.release() }
 
@@ -769,7 +888,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             return false
         }
 
-        _ = await ensureCustomDisplaySurfaceVisible()
+        if showDashboardBeforeUpload {
+            _ = await ensureCustomDisplaySurfaceVisible()
+        }
 
         let builder = G1BitmapPacketBuilder()
         let envelope: G1BitmapPacketEnvelope
@@ -822,33 +943,32 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             return false
         }
 
-        for side in Self.ackSendOrder(for: nil) {
-            let endAcked = await sendCommandAwaitAck(
-                envelope.endPacket,
-                to: side,
-                sequence: nil,
-                timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
-            )
-            guard endAcked else {
-                log("Bitmap end packet ACK failed [\(side.rawValue)]", level: .warning)
-                return false
-            }
+        // Finalize both arms concurrently: the end/CRC ACK round-trips overlap on
+        // the air instead of summing L+R, which halves the finalization phase and
+        // keeps a single head-up refresh under the display's 2 s budget even when
+        // firmware RX chatter (battery/head/swipe frames) is delaying ACKs.
+        let endAcked = await sendCommandAwaitAckBothSidesConcurrently(
+            envelope.endPacket,
+            sequence: nil,
+            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+        )
+        guard endAcked else {
+            log("Bitmap end packet ACK failed", level: .warning)
+            return false
         }
 
-        for side in Self.ackSendOrder(for: nil) {
-            let crcAcked = await sendCommandAwaitAck(
-                envelope.crcPacket,
-                to: side,
-                sequence: nil,
-                timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
-            )
-            guard crcAcked else {
-                log("Bitmap CRC packet ACK failed [\(side.rawValue)]", level: .warning)
-                return false
-            }
+        let crcAcked = await sendCommandAwaitAckBothSidesConcurrently(
+            envelope.crcPacket,
+            sequence: nil,
+            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+        )
+        guard crcAcked else {
+            log("Bitmap CRC packet ACK failed", level: .warning)
+            return false
         }
 
         log("Bitmap sent (\(frame.width)x\(frame.height), packets: \(envelope.dataPackets.count))", level: .info)
+        recordLatchedBitmap(frame, owner: latchOwner)
         return true
     }
     
@@ -879,7 +999,9 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
         )
         if acked {
+            isDashboardVisible = false
             log("Display cleared", level: .info)
+            invalidateLatchedBitmap(reason: "clearDisplay")
         } else {
             log("Exit-all command was not acknowledged", level: .warning)
         }
@@ -1001,44 +1123,50 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         tiltDashboardConfig = config
         lastDashboardFallbackActionAt = nil
 
-        // In app-fallback mode we intentionally disable firmware dashboard activation
-        // so head gestures can drive the app's custom flow instead of the stock dashboard.
-        let mode: G1HeadUpMode
-        if config.enabled {
-            mode = config.appEventFallback ? .off : config.headUpMode
-        } else {
-            mode = .off
-        }
-        let modePayload = Self.headUpModePayload(for: mode)
-        let leftModeAcked = await sendCompatibilityCommand(
-            .headUpMode,
-            payload: modePayload,
-            to: .left,
-            sequence: nil,
-            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
-        )
-        let rightModeAcked = await sendCompatibilityCommand(
-            .headUpMode,
-            payload: modePayload,
-            to: .right,
-            sequence: nil,
-            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
-        )
-        let modeAcked = leftModeAcked || rightModeAcked
-
-        if !modeAcked {
-            log("Tilt dashboard mode command failed", level: .warning)
-        } else {
-            if !leftModeAcked {
-                log("Tilt mode update did not ACK on LEFT", level: .warning)
+        let modeAcked: Bool
+        if Self.headUpModeCommandsEnabled {
+            // In app-fallback mode we intentionally disable firmware dashboard activation
+            // so head gestures can drive the app's custom flow instead of the stock dashboard.
+            let mode: G1HeadUpMode
+            if config.enabled {
+                mode = config.appEventFallback ? .off : config.headUpMode
+            } else {
+                mode = .off
             }
-            if !rightModeAcked {
-                log("Tilt mode update did not ACK on RIGHT", level: .warning)
-            }
-        }
+            let modePayload = Self.headUpModePayload(for: mode)
+            let leftModeAcked = await sendCompatibilityCommand(
+                .headUpMode,
+                payload: modePayload,
+                to: .left,
+                sequence: nil,
+                timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+            )
+            let rightModeAcked = await sendCompatibilityCommand(
+                .headUpMode,
+                payload: modePayload,
+                to: .right,
+                sequence: nil,
+                timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+            )
+            modeAcked = leftModeAcked || rightModeAcked
 
-        if config.appEventFallback, config.enabled {
-            log("Tilt dashboard configured for app-driven mode (firmware head-up disabled)", level: .info)
+            if !modeAcked {
+                log("Tilt dashboard mode command failed", level: .warning)
+            } else {
+                if !leftModeAcked {
+                    log("Tilt mode update did not ACK on LEFT", level: .warning)
+                }
+                if !rightModeAcked {
+                    log("Tilt mode update did not ACK on RIGHT", level: .warning)
+                }
+            }
+
+            if config.appEventFallback, config.enabled {
+                log("Tilt dashboard configured for app-driven mode (firmware head-up disabled)", level: .info)
+            }
+        } else {
+            modeAcked = true
+            headUpModeCommandsSuppressedCount += 1
         }
 
         let visibilityAcked = await setDashboardVisible(false)
@@ -1047,6 +1175,39 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         }
 
         return modeAcked && visibilityAcked
+    }
+
+    /// Hardware-gated experiment: send a minimal dashboard layout packet (`0x06`).
+    /// Not invoked automatically; payload format is inferred from community docs.
+    public func experimentalSendMinimalDashboardLayout() async -> Bool {
+        guard connectionState == .fullyConnected else {
+            log("Cannot send dashboard layout: Not fully connected", level: .warning)
+            return false
+        }
+        let packet = Data([G1Command.DASHBOARD_LAYOUT.rawValue, 0x00])
+        let acked = await sendCommandAwaitAck(
+            packet,
+            timeoutMs: max(700, G1BLEConstants.commandTimeoutMs)
+        )
+        return acked
+    }
+
+    /// Suppress or restore the firmware-owned action assigned to head-up.
+    /// The raw motion event remains enabled, allowing an app-owned dashboard.
+    public func setFirmwareHeadUpActionSuppressed(_ suppressed: Bool) async -> Bool {
+        guard connectionState == .fullyConnected else {
+            return false
+        }
+        let action: UInt8 = suppressed ? 0x02 : 0x00
+        let packet = Data([
+            G1CompatibilityCommand.headUpAction,
+            0x06, 0x00, 0x00, 0x03, action
+        ])
+        let acked = await sendCommandAwaitAck(
+            packet,
+            timeoutMs: max(1_000, G1BLEConstants.commandTimeoutMs)
+        )
+        return acked
     }
 
     /// Show or hide the built-in dashboard UI on one side or both sides.
@@ -1465,6 +1626,22 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         }
     }
 
+    /// Discard this app's stale Core Bluetooth identifiers and perform a broad
+    /// discovery scan. This does not factory-reset the glasses or alter iOS
+    /// Bluetooth settings; it only bypasses remembered-peripheral restoration.
+    public func forgetRememberedGlassesAndScan() {
+        disconnect()
+        UserDefaults.standard.removeObject(forKey: Self.lastLeftUUIDKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastRightUUIDKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastChannelKey)
+        peripheralsByUUID.removeAll()
+        discoveredPairs.removeAll()
+        bondBootstrapSides.removeAll()
+        bondBootstrapRetryPerformed = false
+        log("Forgot saved glasses; starting fresh scan", level: .info)
+        startScanning()
+    }
+
     /// Try to reconnect to last known glasses
     public func reconnectToLastKnown() {
         if !isReconnecting {
@@ -1648,6 +1825,11 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
                                           to side: GlassesSide?,
                                           sequence: UInt8?,
                                           timeoutMs: Int) async -> Bool {
+        if !Self.headUpModeCommandsEnabled, command == .headUpMode {
+            headUpModeCommandsSuppressedCount += 1
+            return true
+        }
+
         let plan = compatibilityPlan(for: command)
         let primary = Data([plan.primary] + payload)
 
@@ -2100,13 +2282,37 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
                 sequence: nil,
                 timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
             )
+            var initialized = acked
+
+            if !initialized && !self.bondBootstrapRetryPerformed {
+                let androidInitData = Data([G1CompatibilityCommand.androidInit, 0x01])
+                let androidInitAcked = await self.sendCommandAwaitAck(
+                    androidInitData,
+                    to: side,
+                    sequence: nil,
+                    timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
+                )
+                var retryInitAcked = false
+                if !androidInitAcked {
+                    retryInitAcked = await self.sendCommandAwaitAck(
+                        initData,
+                        to: side,
+                        sequence: nil,
+                        timeoutMs: max(1_500, G1BLEConstants.commandTimeoutMs)
+                    )
+                }
+                initialized = androidInitAcked || retryInitAcked
+                if !initialized && !self.hasRememberedGlasses {
+                    self.bondBootstrapSides.insert(side)
+                }
+            }
 
             guard self.connectedGlasses?.peripheral(for: side)?.identifier == peripheral.identifier,
                   self.connectedGlasses?.state(for: side) == .initializing else {
                 return
             }
 
-            if acked {
+            if initialized {
                 self.handleInitAck(side: side)
             } else {
                 self.failPeripheralSetup(peripheral, message: "Initialization ACK timed out")
@@ -2126,6 +2332,11 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         failQueuedWrites(for: side)
         updateConnectionState()
         log("Setup failed [\(side.rawValue)]: \(message)", level: .error)
+        if !hasRememberedGlasses {
+            isIntentionalDisconnect = true
+            stopReconnectionTimer()
+            log("Fresh-pair setup failed; automatic retries paused", level: .warning)
+        }
         centralManager.cancelPeripheralConnection(peripheral)
     }
     
@@ -2155,6 +2366,8 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         stopReconnectionTimer()
         reconnectionAttempts = 0
         isReconnecting = false
+        bondBootstrapSides.removeAll()
+        bondBootstrapRetryPerformed = false
         
         // Persist UUIDs for reconnection
         if let leftUUID = glasses.leftPeripheral?.identifier.uuidString,
@@ -2199,7 +2412,7 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
         if frame.commandByte == G1Command.MIC_DATA.rawValue {
             handleMicrophoneFrame(frame)
         }
-        
+
         // Parse event
         if let event = frameParser.parseEvent(from: frame) {
             addEvent(event)
@@ -2217,6 +2430,8 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
             }
 
             handleTiltDashboardFallbackIfNeeded(event)
+        } else if frame.commandByte == G1Command.VENDOR_CONFIG.rawValue {
+            _ = vendorConfigReassembler.ingest(payload: frame.payload)
         }
         
         // Add to frames if not filtered
@@ -2399,11 +2614,41 @@ public final class G1BluetoothManager: NSObject, ObservableObject {
                 "connection.has_error": error != nil
             ]
         )
+
+        if retryBondBootstrapIfReady() {
+            return
+        }
         
         // Attempt reconnection if not intentional
         if !isIntentionalDisconnect && autoReconnect {
             startReconnectionTimer()
         }
+    }
+
+    private func retryBondBootstrapIfReady() -> Bool {
+        guard !bondBootstrapRetryPerformed,
+              bondBootstrapSides == Set([.left, .right]),
+              let glasses = connectedGlasses,
+              glasses.leftPeripheral?.state == .disconnected,
+              glasses.rightPeripheral?.state == .disconnected,
+              let left = glasses.leftPeripheral,
+              let right = glasses.rightPeripheral else {
+            return false
+        }
+
+        bondBootstrapRetryPerformed = true
+        isIntentionalDisconnect = false
+        glasses.leftState = .connecting
+        glasses.rightState = .connecting
+        connectionState = .partiallyConnected
+        centralManager.connect(left, options: [
+            CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
+        ])
+        centralManager.connect(right, options: [
+            CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
+        ])
+        log("Pairing accepted; retrying initialization automatically", level: .info)
+        return true
     }
 
     private func handlePeripheralConnectionFailure(_ peripheral: CBPeripheral, error: Error?) {
