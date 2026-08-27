@@ -49,45 +49,35 @@ final class DashboardCalendarProvider {
             calendars: calendars
         )
 
-        return try await withCheckedThrowingContinuation { continuation in
+        return await withCheckedContinuation { continuation in
             eventStore.fetchReminders(matching: predicate) { reminders in
-                let count = reminders?.filter { reminder in
-                    guard !reminder.isCompleted else { return false }
-                    guard let due = reminder.dueDateComponents?.date else { return true }
-                    return due >= now
-                }.count ?? 0
+                // EventKit invokes this callback on its private reminders-search
+                // queue. A nested collection closure inherits the provider's
+                // @MainActor isolation and traps there, so inspect EventKit's
+                // non-Sendable objects directly and cross the continuation with
+                // only the Sendable count.
+                var count = 0
+                for reminder in reminders ?? [] {
+                    guard !reminder.isCompleted else { continue }
+                    guard let due = reminder.dueDateComponents?.date else {
+                        count += 1
+                        continue
+                    }
+                    if due >= now {
+                        count += 1
+                    }
+                }
+
                 continuation.resume(returning: count)
             }
         }
     }
 
     private func requestCalendarAccess() async throws -> Bool {
-        if #available(iOS 17.0, *) {
-            return try await eventStore.requestFullAccessToEvents()
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            eventStore.requestAccess(to: .event) { granted, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: granted)
-                }
-            }
-        }
+        try await eventStore.requestFullAccessToEvents()
     }
 
     private func requestRemindersAccess() async throws -> Bool {
-        if #available(iOS 17.0, *) {
-            return try await eventStore.requestFullAccessToReminders()
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            eventStore.requestAccess(to: .reminder) { granted, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: granted)
-                }
-            }
-        }
+        try await eventStore.requestFullAccessToReminders()
     }
 }

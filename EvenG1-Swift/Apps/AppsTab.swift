@@ -1,9 +1,9 @@
 import SwiftUI
 import EvenG1Core
 
-/// Catalog of things the glasses can show. Each entry is a self-contained widget
-/// with its own configuration, so adding Weather or Calendar later means adding
-/// a row here rather than another section on a shared scroll view.
+/// Catalog of things the glasses can show. A live lens preview sits up top as the
+/// hero, with the modules below in a bento grid. Adding Weather or Calendar later
+/// means adding one tile here rather than another list row.
 struct AppsTab: View {
     @EnvironmentObject private var bluetoothManager: G1BluetoothManager
     @EnvironmentObject private var appActionRouter: AppActionRouter
@@ -18,87 +18,101 @@ struct AppsTab: View {
     @State private var notesWidgetEnabled = true
     @State private var dashboardWidgetEnabled = true
 
+    private var isLinked: Bool {
+        bluetoothManager.connectionState == .fullyConnected
+    }
+
+    private var moduleCount: Int {
+        [dashboardWidgetEnabled, transitWidgetEnabled, notificationsWidgetEnabled,
+         translateWidgetEnabled, notesWidgetEnabled].filter { $0 }.count
+    }
+
     var body: some View {
         NavigationStack(path: $path) {
             ScrollView {
-                VStack(spacing: 16) {
-                    if bluetoothManager.connectionState != .fullyConnected {
-                        DisconnectedNotice()
+                VStack(alignment: .leading, spacing: Even.Space.section) {
+                    EvenScreenHeader(eyebrow: "Even Realities / G1", title: "Heads-Up") {
+                        EvenStatusIndicator(isLive: isLinked)
                     }
 
-                    if dashboardWidgetEnabled {
-                        NavigationLink {
-                            DashboardWidgetView(viewModel: dashboardViewModel)
-                        } label: {
-                            HUDAppCard(
-                                title: "Dashboard",
-                                subtitle: "Time, calendar, and a widget on look up",
-                                icon: "square.grid.2x2.fill",
-                                tint: .green
-                            )
-                        }
-                        .accessibilityIdentifier("apps.dashboardLink")
+                    EvenLensPreview(isLinked: isLinked) {
+                        EvenLensDashboardContent(
+                            isLinked: isLinked,
+                            statusHeadline: isLinked ? "On the lens" : "Not linked",
+                            statusDetail: isLinked
+                                ? "Look up to wake the dashboard"
+                                : "Connect on the Device tab"
+                        )
                     }
 
-                    if transitWidgetEnabled {
-                        NavigationLink {
-                            TransitWidgetView(viewModel: transitViewModel)
-                        } label: {
-                            HUDAppCard(
-                                title: "Transit",
-                                subtitle: transitSubtitle,
-                                icon: "tram.fill",
-                                tint: .cyan
-                            )
-                        }
-                        .accessibilityIdentifier("apps.transitLink")
+                    if !isLinked {
+                        EvenDisconnectedNotice()
                     }
 
-                    if notificationsWidgetEnabled {
-                        NavigationLink {
-                            NotificationsWidgetView()
-                        } label: {
-                            HUDAppCard(
-                                title: "Notifications",
-                                subtitle: "Envelope on the lens, tilt up to read",
-                                icon: "bell.badge.fill",
-                                tint: .orange
-                            )
-                        }
-                        .accessibilityIdentifier("apps.notificationsLink")
-                    }
+                    VStack(alignment: .leading, spacing: Even.Space.gap + 2) {
+                        EvenSectionHeader(title: "Lens Modules", trailing: "\(moduleCount) Available")
 
-                    if translateWidgetEnabled {
-                        NavigationLink(value: HeadsUpDestination.translate) {
-                            HUDAppCard(
-                                title: "Translate",
-                                subtitle: "Live translated captions from the glasses mic",
-                                icon: "translate",
-                                tint: .green
-                            )
-                        }
-                        .accessibilityIdentifier("apps.translateLink")
-                    }
+                        LazyVGrid(columns: EvenBento.columns, spacing: Even.Space.gap) {
+                            if dashboardWidgetEnabled {
+                                NavigationLink {
+                                    DashboardWidgetView(viewModel: dashboardViewModel)
+                                } label: {
+                                    EvenBentoTile(title: "Dashboard", systemImage: "square.grid.2x2")
+                                }
+                                .buttonStyle(.evenPressable)
+                                .accessibilityIdentifier("apps.dashboardLink")
+                            }
 
-                    if notesWidgetEnabled {
-                        NavigationLink {
-                            NotesWidgetView()
-                        } label: {
-                            HUDAppCard(
-                                title: "Notes & Prompts",
-                                subtitle: "Keep a line of text in view",
-                                icon: "text.alignleft",
-                                tint: .purple
-                            )
+                            if transitWidgetEnabled {
+                                NavigationLink {
+                                    TransitWidgetView(viewModel: transitViewModel)
+                                } label: {
+                                    EvenBentoTile(
+                                        title: "Transit",
+                                        systemImage: "tram",
+                                        secondary: transitSubtitle
+                                    )
+                                }
+                                .buttonStyle(.evenPressable)
+                                .accessibilityIdentifier("apps.transitLink")
+                            }
+
+                            if notificationsWidgetEnabled {
+                                NavigationLink {
+                                    NotificationsWidgetView()
+                                } label: {
+                                    EvenBentoTile(title: "Notifications", systemImage: "bell")
+                                }
+                                .buttonStyle(.evenPressable)
+                                .accessibilityIdentifier("apps.notificationsLink")
+                            }
+
+                            if translateWidgetEnabled {
+                                NavigationLink(value: HeadsUpDestination.translate) {
+                                    EvenBentoTile(title: "Translate", systemImage: "translate")
+                                }
+                                .buttonStyle(.evenPressable)
+                                .accessibilityIdentifier("apps.translateLink")
+                            }
+
+                            if notesWidgetEnabled {
+                                NavigationLink {
+                                    NotesWidgetView()
+                                } label: {
+                                    EvenBentoTile(title: "Notes", systemImage: "text.alignleft")
+                                }
+                                .buttonStyle(.evenPressable)
+                                .accessibilityIdentifier("apps.notesLink")
+                            }
                         }
-                        .accessibilityIdentifier("apps.notesLink")
                     }
                 }
-                .padding(16)
+                .padding(.horizontal, Even.Space.margin)
+                .padding(.top, 12)
+                .padding(.bottom, 24)
             }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("Heads-Up")
-            .navigationBarTitleDisplayMode(.large)
+            .background(Even.Palette.base.ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: HeadsUpDestination.self) { destination in
                 switch destination {
                 case .translate:
@@ -153,61 +167,4 @@ struct AppsTab: View {
 
 private enum HeadsUpDestination: Hashable {
     case translate
-}
-
-private struct DisconnectedNotice: View {
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "eyeglasses")
-                .font(.title3)
-                .foregroundStyle(.orange)
-
-            Text("Glasses are not connected. Widgets still work in the app and will mirror to the lens once you connect.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .accessibilityIdentifier("apps.disconnectedNotice")
-    }
-}
-
-private struct HUDAppCard: View {
-    let title: String
-    let subtitle: String
-    let icon: String
-    let tint: Color
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(.title2)
-                .foregroundStyle(tint)
-                .frame(width: 46, height: 46)
-                .background(tint.opacity(0.15))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                Text(subtitle)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            Image(systemName: "chevron.right")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .padding(14)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-    }
 }

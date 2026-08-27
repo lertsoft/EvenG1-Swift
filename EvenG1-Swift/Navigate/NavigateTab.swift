@@ -62,7 +62,7 @@ struct NavigateTab: View {
                     mapLayer
                         .ignoresSafeArea()
                 } else {
-                    Color.black
+                    Even.Palette.base
                         .ignoresSafeArea()
                 }
 
@@ -81,7 +81,7 @@ struct NavigateTab: View {
                     bottomPanel
                 }
             }
-            .background(Color.black)
+            .background(Even.Palette.base)
             .navigationBarHidden(true)
             .confirmationDialog(
                 stopConfirmationTitle,
@@ -147,23 +147,25 @@ struct NavigateTab: View {
 
             if let route = viewModel.routePolyline {
                 MapPolyline(route)
-                    .stroke(.cyan.opacity(0.85), lineWidth: 6)
+                    .stroke(Even.Palette.phosphor.opacity(0.9), lineWidth: 6)
             }
 
             if let destination = viewModel.destinationCoordinate {
                 Annotation("Destination", coordinate: destination) {
                     ZStack {
                         Circle()
-                            .fill(Color.black.opacity(0.75))
-                            .frame(width: 34, height: 34)
-                        Image(systemName: "mappin.circle.fill")
-                            .font(.title2)
-                            .foregroundStyle(.cyan)
+                            .fill(Even.Palette.base.opacity(0.85))
+                            .frame(width: 30, height: 30)
+                            .overlay(Circle().stroke(Even.Palette.phosphor, lineWidth: 1.5))
+                        Circle()
+                            .fill(Even.Palette.phosphor)
+                            .frame(width: 12, height: 12)
                     }
+                    .shadow(color: Even.Palette.phosphor.opacity(0.5), radius: 6)
                 }
             }
         }
-        .mapStyle(.standard(elevation: .flat, emphasis: .muted))
+        .mapStyle(.standard(elevation: .flat, emphasis: .muted, pointsOfInterest: .excludingAll))
         .colorScheme(.dark)
         .onMapCameraChange(frequency: .onEnd) { _ in
             viewModel.userDidMoveMap()
@@ -175,11 +177,11 @@ struct NavigateTab: View {
         }
         .overlay(alignment: .top) {
             LinearGradient(
-                colors: [Color.black.opacity(0.55), Color.clear],
+                colors: [Even.Palette.base.opacity(0.65), Color.clear],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 180)
+            .frame(height: 200)
             .allowsHitTesting(false)
         }
     }
@@ -204,27 +206,31 @@ struct NavigateTab: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, Even.Space.margin)
         .padding(.top, 12)
     }
 
     private var idleHeader: some View {
-        Text("Navigate")
-            .font(.title2.weight(.semibold))
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Even Realities / Wayfinding").evenEyebrow()
+            Text("Navigate")
+                .font(.evenScreenTitle)
+                .foregroundStyle(Even.Palette.textPrimary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var tripHeader: some View {
         HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(isTripActive ? "Even Realities / Trip" : "Even Realities / Wayfinding").evenEyebrow()
                 Text(isTripActive ? viewModel.destinationTitle : "Navigate")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .font(.system(.title2, design: .default).weight(.semibold))
+                    .foregroundStyle(Even.Palette.textPrimary)
                     .lineLimit(1)
                 Text(headerSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.evenSubtitle)
+                    .foregroundStyle(Even.Palette.textSecondary)
                     .lineLimit(1)
             }
 
@@ -235,11 +241,14 @@ struct NavigateTab: View {
                     isConfirmingStop = true
                 } label: {
                     Text("End")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .font(.evenTileTitle)
+                        .foregroundStyle(Even.Palette.textPrimary)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
-                        .background(Capsule().fill(Color.red.opacity(0.85)))
+                        .background(
+                            RoundedRectangle(cornerRadius: Even.Radius.chip, style: .continuous)
+                                .fill(Even.Palette.destructive.opacity(0.9))
+                        )
                 }
                 .accessibilityIdentifier("navigation.endTripButton")
             }
@@ -247,12 +256,11 @@ struct NavigateTab: View {
             Button {
                 isHUDPreviewVisible.toggle()
             } label: {
-                Label("Glasses preview", systemImage: "eyeglasses")
-                    .labelStyle(.iconOnly)
-                    .font(.title3)
-                    .foregroundStyle(isHUDPreviewVisible ? Color.cyan : .white.opacity(0.85))
-                    .padding(10)
-                    .background(.ultraThinMaterial, in: Circle())
+                Image(systemName: "eyeglasses")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(isHUDPreviewVisible ? Even.Palette.phosphor : Even.Palette.textPrimary)
+                    .frame(width: 40, height: 40)
+                    .glassCircle()
             }
             .accessibilityIdentifier("navigation.hudPreviewButton")
         }
@@ -285,52 +293,42 @@ struct NavigateTab: View {
                     Task { await viewModel.centerOnUser() }
                 } label: {
                     Image(systemName: "location.fill")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(viewModel.isFollowingUser ? Color.cyan : .white)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(viewModel.isFollowingUser ? Even.Palette.phosphor : Even.Palette.textPrimary)
                         .frame(width: 44, height: 44)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                        )
+                        .glassCircle()
                 }
                 .accessibilityLabel("Center on my location")
                 .accessibilityIdentifier("navigation.locateUserButton")
 
                 Spacer()
             }
-            .padding(.leading, 16)
-            .padding(.bottom, 16)
+            .padding(.leading, Even.Space.margin)
+            .padding(.bottom, Even.Space.margin)
         }
     }
 
     private var locationPermissionBanner: some View {
         HStack(spacing: 10) {
             Image(systemName: "location.slash.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Even.Palette.caution)
 
             Text("Location access needed to center the map")
-                .font(.footnote)
-                .foregroundStyle(.white)
+                .font(.evenSubtitle)
+                .foregroundStyle(Even.Palette.textPrimary)
                 .lineLimit(2)
 
             Spacer(minLength: 0)
 
             if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
                 Link("Settings", destination: settingsURL)
-                    .font(.footnote.weight(.semibold))
+                    .font(.evenTileTitle)
+                    .foregroundStyle(Even.Palette.phosphor)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.black.opacity(0.72))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(Color.orange.opacity(0.35), lineWidth: 1)
-                )
-        )
+        .glassPanel(radius: 14)
         .padding(.horizontal, 10)
         .accessibilityIdentifier("navigation.locationPermissionBanner")
     }
@@ -338,42 +336,43 @@ struct NavigateTab: View {
     private var hudPreviewPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("On your glasses")
+                Text("On the lens").evenSectionHeader()
                 if bluetoothManager.connectionState != .fullyConnected {
-                    Text("· not connected")
-                        .foregroundStyle(.orange)
+                    Text("· offline")
+                        .font(.evenMicro)
+                        .foregroundStyle(Even.Palette.caution)
                 }
                 Spacer()
                 Text(viewModel.glassesDisplayDetailLabel)
-                Text("·")
+                    .font(.evenMicro)
+                    .foregroundStyle(Even.Palette.textSecondary)
+                Text("·").foregroundStyle(Even.Palette.textTertiary)
                 Text(viewModel.transportModeLabel)
+                    .font(.evenMicro)
+                    .foregroundStyle(Even.Palette.textSecondary)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
 
             if let image = viewModel.currentNavVisualImage {
-                GlassesHUDFrame {
+                EvenLensDisplay {
                     Image(uiImage: image)
                         .interpolation(.none)
                         .resizable()
                         .scaledToFit()
                 }
             } else {
-                GlassesHUDPreview(
-                    text: viewModel.hudInstructionText,
-                    placeholder: "Pick a destination to preview guidance"
-                )
+                EvenLensDisplay {
+                    Text(viewModel.hudInstructionText.isEmpty
+                        ? "Pick a destination to preview guidance"
+                        : viewModel.hudInstructionText)
+                        .font(.evenHUD(15))
+                        .foregroundStyle(viewModel.hudInstructionText.isEmpty
+                            ? Even.Palette.phosphor.opacity(0.4)
+                            : Even.Palette.phosphor)
+                }
             }
         }
         .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color.black.opacity(0.62))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-        )
+        .glassPanel(radius: Even.Radius.sheet)
         .accessibilityIdentifier("navigation.hudPreviewPanel")
     }
 
@@ -381,7 +380,7 @@ struct NavigateTab: View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Even.Palette.textSecondary)
 
                 TextField(
                     viewModel.showsNavigationControls ? "Search destination" : "Search",
@@ -389,7 +388,8 @@ struct NavigateTab: View {
                 )
                 .textInputAutocapitalization(.words)
                 .autocorrectionDisabled()
-                .foregroundStyle(.white)
+                .foregroundStyle(Even.Palette.textPrimary)
+                .tint(Even.Palette.phosphor)
                 .submitLabel(.search)
                 .onSubmit {
                     Task { await viewModel.submitSearchQuery() }
@@ -404,20 +404,13 @@ struct NavigateTab: View {
                         viewModel.updateSearchQuery("")
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Even.Palette.textSecondary)
                     }
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 11)
-            .background(
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.black.opacity(0.45))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14)
-                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                    )
-            )
+            .padding(.vertical, 12)
+            .glassPanel(radius: 14)
 
             if viewModel.showsNavigationControls {
                 modePicker
@@ -426,8 +419,9 @@ struct NavigateTab: View {
     }
 
     private var modePicker: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Even.Space.gap) {
             ForEach(G1NavigationMode.allCases, id: \.self) { mode in
+                let isSelected = viewModel.selectedMode == mode
                 Button {
                     viewModel.selectedMode = mode
                     if let destination = viewModel.destinationCoordinate {
@@ -437,13 +431,14 @@ struct NavigateTab: View {
                     }
                 } label: {
                     Text(mode.displayName)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(viewModel.selectedMode == mode ? Color.black : Color.white)
+                        .font(.evenMicro)
+                        .tracking(0.5)
+                        .foregroundStyle(isSelected ? Even.Palette.base : Even.Palette.textPrimary)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 9)
                         .background(
-                            Capsule()
-                                .fill(viewModel.selectedMode == mode ? Color.cyan : Color.white.opacity(0.12))
+                            RoundedRectangle(cornerRadius: Even.Radius.chip, style: .continuous)
+                                .fill(isSelected ? Even.Palette.phosphor : Color.white.opacity(0.1))
                         )
                 }
                 .buttonStyle(.plain)
@@ -463,13 +458,13 @@ struct NavigateTab: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(suggestion.title)
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(.white)
+                                .font(.evenTileTitle)
+                                .foregroundStyle(Even.Palette.textPrimary)
                                 .lineLimit(1)
                             if !suggestion.displaySubtitle.isEmpty {
                                 Text(suggestion.displaySubtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .font(.evenSubtitle)
+                                    .foregroundStyle(Even.Palette.textSecondary)
                                     .lineLimit(1)
                             }
                         }
@@ -480,18 +475,11 @@ struct NavigateTab: View {
                     .buttonStyle(.plain)
 
                     if suggestion.id != viewModel.suggestions.prefix(5).last?.id {
-                        Divider().background(Color.white.opacity(0.12))
+                        Divider().overlay(Even.Palette.border)
                     }
                 }
             }
-            .background(
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.black.opacity(0.62))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-            )
+            .glassPanel(radius: 14)
         }
     }
 
@@ -499,8 +487,8 @@ struct NavigateTab: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(viewModel.activeInstructionTitle)
-                    .font(.headline)
-                    .foregroundStyle(.white)
+                    .font(.system(.headline, design: .default))
+                    .foregroundStyle(Even.Palette.textPrimary)
                     .lineLimit(2)
 
                 Spacer()
@@ -509,70 +497,61 @@ struct NavigateTab: View {
             }
 
             Text(viewModel.activeInstructionSubtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(.evenSubtitle)
+                .foregroundStyle(Even.Palette.textSecondary)
                 .lineLimit(1)
 
             if isTripActive {
                 ProgressView(value: viewModel.progressFraction)
-                    .tint(.green)
-                    .background(.white.opacity(0.1))
+                    .tint(Even.Palette.phosphor)
+                    .background(Color.white.opacity(0.1))
             }
         }
         .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color.black.opacity(0.62))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-        )
+        .glassPanel(radius: Even.Radius.sheet)
     }
 
     private var stateChip: some View {
         Text(stateLabel)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.white)
+            .font(.evenMicro)
+            .tracking(1)
+            .textCase(.uppercase)
+            .foregroundStyle(isTripActive ? Even.Palette.phosphor : Even.Palette.textSecondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(Capsule().fill(Color.white.opacity(0.12)))
+            .background(
+                RoundedRectangle(cornerRadius: Even.Radius.chip, style: .continuous)
+                    .fill(Color.white.opacity(0.1))
+            )
     }
 
     private var stateLabel: String {
         switch viewModel.state {
-        case .idle:
-            return "Idle"
-        case .searching:
-            return "Search"
-        case .routePreview:
-            return "Preview"
-        case .navigating:
-            return "Live"
-        case .rerouting:
-            return "Rerouting"
-        case .arrived:
-            return "Arrived"
-        case .error(_):
-            return "Error"
+        case .idle: return "Idle"
+        case .searching: return "Search"
+        case .routePreview: return "Preview"
+        case .navigating: return "Live"
+        case .rerouting: return "Rerouting"
+        case .arrived: return "Arrived"
+        case .error: return "Error"
         }
     }
 
     private var bottomPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Favorite")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
+                Text("Favorites").evenSectionHeader()
 
                 Spacer()
 
                 Button {
                     Task { await viewModel.addCustomFavorite() }
                 } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.cyan)
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Even.Palette.phosphor)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Even.Palette.phosphorDim))
                 }
                 .accessibilityLabel("Add favorite location")
                 .accessibilityIdentifier("navigation.addFavoriteButton")
@@ -581,27 +560,20 @@ struct NavigateTab: View {
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
+                HStack(spacing: Even.Space.gap) {
                     ForEach(viewModel.favorites) { favorite in
                         favoriteCard(favorite)
                     }
 
                     addLocationCard
                 }
-                .padding(.bottom, 4)
+                .padding(.bottom, 2)
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Even.Space.margin)
         .padding(.top, 14)
-        .padding(.bottom, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 22)
-                .fill(Color.black.opacity(0.64))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-        )
+        .padding(.bottom, 12)
+        .glassPanel(radius: Even.Radius.sheet)
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
     }
@@ -610,36 +582,27 @@ struct NavigateTab: View {
         Group {
             switch viewModel.state {
             case .routePreview where viewModel.routePolyline != nil:
-                Button {
+                EvenPrimaryButton(
+                    title: viewModel.canStartTurnByTurn ? "Start" : "ETA Only",
+                    systemImage: viewModel.canStartTurnByTurn ? "location.north.line" : "tram"
+                ) {
                     Task { await viewModel.startNavigation() }
-                } label: {
-                    Label(
-                        viewModel.canStartTurnByTurn ? "Start" : "ETA only",
-                        systemImage: viewModel.canStartTurnByTurn
-                            ? "arrow.triangle.turn.up.right.circle.fill"
-                            : "tram.fill"
-                    )
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.cyan)
+                .frame(maxWidth: 140)
+                .opacity(viewModel.canStartTurnByTurn ? 1 : 0.5)
                 .disabled(!viewModel.canStartTurnByTurn)
 
             case .arrived:
-                Button {
+                EvenPrimaryButton(title: "Done", systemImage: "checkmark") {
                     Task { await viewModel.stopNavigation() }
-                } label: {
-                    Label("Done", systemImage: "checkmark.circle.fill")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
+                .frame(maxWidth: 120)
 
             case .navigating, .rerouting:
-                Button {
+                EvenPrimaryButton(title: "End Trip", systemImage: "stop.circle", style: .secondary) {
                     isConfirmingStop = true
-                } label: {
-                    Label("End trip", systemImage: "stop.circle")
                 }
-                .buttonStyle(.bordered)
+                .frame(maxWidth: 140)
 
             case .idle, .searching, .routePreview, .error:
                 EmptyView()
@@ -648,11 +611,11 @@ struct NavigateTab: View {
     }
 
     private func favoriteCard(_ favorite: NavigationFavorite) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Image(systemName: iconName(for: favorite.kind))
-                    .font(.title2)
-                    .foregroundStyle(.white)
+                    .font(.system(size: 20, weight: .regular))
+                    .foregroundStyle(Even.Palette.textPrimary)
 
                 Spacer()
 
@@ -661,29 +624,35 @@ struct NavigateTab: View {
                         selectedFavoriteForRemoval = favorite
                     } label: {
                         Image(systemName: "ellipsis")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Even.Palette.textSecondary)
                     }
                     .buttonStyle(.plain)
                 }
             }
 
+            Spacer(minLength: 12)
+
             Text(favorite.title)
-                .font(.title3.weight(.medium))
-                .foregroundStyle(.white)
+                .font(.evenTileTitle)
+                .tracking(-0.2)
+                .foregroundStyle(Even.Palette.textPrimary)
                 .lineLimit(1)
 
             Text(favorite.isConfigured ? favorite.subtitle : "Set Location")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                .font(.evenSubtitle)
+                .foregroundStyle(Even.Palette.textSecondary)
                 .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(width: 150, alignment: .leading)
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.white.opacity(0.07))
+        .frame(width: 150, height: Even.tileMinHeight, alignment: .leading)
+        .padding(Even.Space.tilePadding)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: Even.Radius.tile, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Even.Radius.tile, style: .continuous)
+                .stroke(Even.Palette.border, lineWidth: 1)
         )
-        .contentShape(RoundedRectangle(cornerRadius: 14))
+        .contentShape(RoundedRectangle(cornerRadius: Even.Radius.tile, style: .continuous))
         .onTapGesture {
             Task {
                 if favorite.isConfigured {
@@ -699,24 +668,25 @@ struct NavigateTab: View {
         Button {
             Task { await viewModel.addCustomFavorite() }
         } label: {
-            VStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 0) {
                 Image(systemName: "plus")
-                    .font(.largeTitle.weight(.light))
-                    .foregroundStyle(.white)
-
+                    .font(.system(size: 20, weight: .regular))
+                    .foregroundStyle(Even.Palette.phosphor)
+                Spacer(minLength: 12)
                 Text("Add")
-                    .font(.title3.weight(.medium))
-                    .foregroundStyle(.white)
-
+                    .font(.evenTileTitle)
+                    .foregroundStyle(Even.Palette.textPrimary)
                 Text("Location")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(.evenSubtitle)
+                    .foregroundStyle(Even.Palette.textSecondary)
             }
-            .frame(width: 120)
-            .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.white.opacity(0.07))
+            .frame(width: 120, height: Even.tileMinHeight, alignment: .leading)
+            .padding(Even.Space.tilePadding)
+            .background(Even.Palette.phosphorDim)
+            .clipShape(RoundedRectangle(cornerRadius: Even.Radius.tile, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Even.Radius.tile, style: .continuous)
+                    .stroke(Even.Palette.phosphor.opacity(0.3), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -725,12 +695,30 @@ struct NavigateTab: View {
 
     private func iconName(for kind: NavigationFavoriteKind) -> String {
         switch kind {
-        case .home:
-            return "house"
-        case .office:
-            return "building.2"
-        case .custom:
-            return "mappin.and.ellipse"
+        case .home: return "house"
+        case .office: return "building.2"
+        case .custom: return "mappin.and.ellipse"
         }
+    }
+}
+
+// MARK: - Glass treatment
+
+private extension View {
+    /// Dark glass over the map: `ultraThinMaterial` with the spec's hairline
+    /// white/10 stroke.
+    func glassPanel(radius: CGFloat) -> some View {
+        self
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+            )
+    }
+
+    func glassCircle() -> some View {
+        self
+            .background(.ultraThinMaterial, in: Circle())
+            .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
     }
 }

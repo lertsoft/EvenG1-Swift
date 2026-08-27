@@ -42,7 +42,7 @@ struct ContentView: View {
 
     var body: some View {
         tabs
-            .tint(.cyan)
+            .tint(Even.Palette.phosphor)
             .environmentObject(developerSettings)
             .onAppear(perform: handleAppear)
             .onReceive(NotificationCenter.default.publisher(for: .evenG1FeatureFlagsDidBecomeReady)) { _ in
@@ -128,18 +128,14 @@ struct ContentView: View {
             if deviceTabEnabled {
                 DeviceTab()
                     .trackDatadogRUMView(name: "DeviceTab", attributes: rumViewAttributes)
-                    .tabItem {
-                        Label("Device", systemImage: "eyeglasses")
-                    }
+                    .toolbar(.hidden, for: .tabBar)
                     .tag(0)
             }
 
             if navigateTabEnabled {
                 NavigateTab(isActive: selectedTab == 1)
                     .trackDatadogRUMView(name: "NavigateTab", attributes: rumViewAttributes)
-                    .tabItem {
-                        Label("Navigate", systemImage: "map")
-                    }
+                    .toolbar(.hidden, for: .tabBar)
                     .tag(1)
             }
 
@@ -150,12 +146,27 @@ struct ContentView: View {
                     dashboardViewModel: dashboardViewModel
                 )
                     .trackDatadogRUMView(name: "AppsTab", attributes: rumViewAttributes)
-                    .tabItem {
-                        Label("Heads-Up", systemImage: "square.stack.3d.up")
-                    }
+                    .toolbar(.hidden, for: .tabBar)
                     .tag(2)
             }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            EvenTabBar(items: tabItems, selection: $selectedTab)
+        }
+    }
+
+    private var tabItems: [EvenTabItem] {
+        var items: [EvenTabItem] = []
+        if deviceTabEnabled {
+            items.append(EvenTabItem(tag: 0, title: "Device", systemImage: "eyeglasses"))
+        }
+        if navigateTabEnabled {
+            items.append(EvenTabItem(tag: 1, title: "Navigate", systemImage: "map"))
+        }
+        if headsUpTabEnabled {
+            items.append(EvenTabItem(tag: 2, title: "Heads-Up", systemImage: "square.stack.3d.up"))
+        }
+        return items
     }
 
     private func loadFeatureFlags() {

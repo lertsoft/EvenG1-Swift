@@ -39,13 +39,13 @@ struct GlassesHUDPreview: View {
             if visibleLines.isEmpty {
                 Text(placeholder)
                     .font(.system(size: Self.maximumFontSize, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .foregroundStyle(Even.Palette.phosphor.opacity(0.4))
             } else {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(visibleLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
                             .font(.system(size: fontSize, design: .monospaced))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Even.Palette.phosphor)
                             .lineLimit(1)
                             .fixedSize()
                     }
@@ -91,11 +91,11 @@ struct GlassesHUDFrame<Content: View>: View {
                 .frame(width: proxy.size.width, height: height * scale, alignment: .topLeading)
         }
         .aspectRatio(width / height, contentMode: .fit)
-        .background(Color.black)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .background(Even.Palette.hud)
+        .clipShape(RoundedRectangle(cornerRadius: Even.Radius.hud))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.cyan.opacity(0.35), lineWidth: 1)
+            RoundedRectangle(cornerRadius: Even.Radius.hud)
+                .stroke(Even.Palette.border, lineWidth: 1)
         )
     }
 }
