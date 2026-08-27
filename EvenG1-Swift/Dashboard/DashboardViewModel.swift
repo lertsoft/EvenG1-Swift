@@ -14,10 +14,14 @@ import UIKit
 final class DashboardViewModel: ObservableObject {
     @Published private(set) var previewImage: UIImage?
     @Published private(set) var lastSnapshot: DashboardSnapshot?
+    @Published private(set) var pageIndex: Int = 0
+    @Published private(set) var isRefreshingData = false
 
     let settingsStore: DashboardSettingsStore
+    let stationLockStore: MTAManualStationLockStore
 
     private let renderer = DashboardBitmapRenderer()
+    private let dataCoordinator: DashboardDataCoordinator
     private weak var bluetoothManager: G1BluetoothManager?
 
     private var cachedFrame: G1BitmapFrame?
@@ -37,15 +41,62 @@ final class DashboardViewModel: ObservableObject {
     private var requestedFirmwareHeadUpSuppression: Bool?
     private var firmwareHeadUpConfigurationGeneration: UInt64 = 0
 
-    init(settingsStore: DashboardSettingsStore = DashboardSettingsStore()) {
+    private var autoRotateTask: Task<Void, Never>?
+    private var refreshDataTask: Task<Void, Never>?
+    private var isDataRefreshQueued = false
+    private var isDashboardDisplayed = false
+    private var lastDataRefreshFingerprint: DataRefreshFingerprint?
+
+    private struct DataRefreshFingerprint: Equatable {
+        var calendarEnabled: Bool
+        var remindersEnabled: Bool
+        var weatherEnabled: Bool
+        var transitEnabled: Bool
+        var newsFeedURL: String
+        var transitHorizonMinutes: Int
+        var selectedWidgets: [DashboardWidgetKind]
+    }
+
+    private static func dataRefreshFingerprint(for settings: DashboardSettings) -> DataRefreshFingerprint {
+        DataRefreshFingerprint(
+            calendarEnabled: settings.calendarEnabled,
+            remindersEnabled: settings.remindersEnabled,
+            weatherEnabled: settings.weatherEnabled,
+            transitEnabled: settings.transitEnabled,
+            newsFeedURL: settings.newsFeedURL,
+            transitHorizonMinutes: settings.transitHorizonMinutes,
+            selectedWidgets: settings.selectedWidgets
+        )
+    }
+
+    init(
+        settingsStore: DashboardSettingsStore = DashboardSettingsStore(),
+        stationLockStore: MTAManualStationLockStore = MTAManualStationLockStore(),
+        dataCoordinator: DashboardDataCoordinator? = nil
+    ) {
         self.settingsStore = settingsStore
+        self.stationLockStore = stationLockStore
+        self.dataCoordinator = dataCoordinator ?? DashboardDataCoordinator(
+            transitProvider: DashboardTransitProvider(
+                locationProvider: CurrentLocationProvider(),
+                stationLockStore: stationLockStore
+            )
+        )
         refreshSnapshot()
 
         settingsStore.$settings
             .sink { [weak self] settings in
                 guard let self else { return }
-                self.refreshSnapshot()
+                self.clampPageIndex(for: settings)
+                let fingerprint = Self.dataRefreshFingerprint(for: settings)
+                if fingerprint != self.lastDataRefreshFingerprint {
+                    self.lastDataRefreshFingerprint = fingerprint
+                    Task { await self.refreshData() }
+                } else {
+                    self.refreshSnapshot()
+                }
                 self.synchronizeFirmwareHeadUpAction(suppressed: settings.isEnabled)
+                self.updateAutoRotateTask(isDisplayed: self.isDashboardDisplayed)
             }
             .store(in: &cancellables)
     }
@@ -62,6 +113,8 @@ final class DashboardViewModel: ObservableObject {
                     )
                 } else {
                     self.requestedFirmwareHeadUpSuppression = nil
+                    self.isDashboardDisplayed = false
+                    self.updateAutoRotateTask(isDisplayed: false)
                 }
             }
         synchronizeFirmwareHeadUpAction(suppressed: settingsStore.settings.isEnabled)
@@ -100,6 +153,39 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Data refresh
+
+    func refreshData() async {
+        if isRefreshingData {
+            isDataRefreshQueued = true
+            return
+        }
+
+        isRefreshingData = true
+        defer { isRefreshingData = false }
+
+        repeat {
+            isDataRefreshQueued = false
+            let settings = settingsStore.settings
+            await dataCoordinator.refresh(settings: settings)
+            refreshSnapshot()
+        } while isDataRefreshQueued && !Task.isCancelled
+    }
+
+    private func refreshDataAndResendIfChanged() {
+        refreshDataTask?.cancel()
+        refreshDataTask = Task { [weak self] in
+            guard let self else { return }
+            let previous = self.lastSnapshot
+            await self.refreshData()
+            guard !Task.isCancelled else { return }
+            guard self.isDashboardDisplayed else { return }
+            if self.lastSnapshot != previous {
+                _ = await self.sendCachedFrame(caller: "refreshData")
+            }
+        }
+    }
+
     // MARK: - Snapshot / rendering
 
     /// Rebuilds the snapshot from currently available data and re-renders the
@@ -107,29 +193,62 @@ final class DashboardViewModel: ObservableObject {
     /// APIs are gated off by default and simply leave their field unavailable.
     func refreshSnapshot(referenceDate: Date = Date()) {
         let settings = settingsStore.settings
+        clampPageIndex(for: settings)
+        let widgets = widgetContents(for: settings)
         let snapshot = DashboardSnapshot(
             capturedAt: Date(),
             referenceDate: referenceDate,
-            reminderCount: nil,
-            temperature: nil,
-            nextEvent: nil,
-            widget: widgetContent(for: settings)
+            reminderCount: settings.remindersEnabled ? dataCoordinator.cache.reminderCount : nil,
+            temperature: settings.weatherEnabled ? dataCoordinator.cache.temperature : nil,
+            nextEvent: settings.calendarEnabled ? dataCoordinator.cache.nextEvent : nil,
+            widgets: widgets,
+            displayMode: settings.widgetDisplayMode,
+            pageIndex: pageIndex
         )
         lastSnapshot = snapshot
         render(snapshot: snapshot, settings: settings)
     }
 
-    private func widgetContent(for settings: DashboardSettings) -> DashboardWidgetContent {
-        switch settings.selectedWidget {
+    private func widgetContents(for settings: DashboardSettings) -> [DashboardWidgetContent] {
+        let selected = settings.selectedWidgets
+        guard !selected.isEmpty else {
+            return [.unavailable(reason: "Select a widget in settings")]
+        }
+
+        return selected.map { kind in
+            widgetContent(for: kind, settings: settings)
+        }
+    }
+
+    private func widgetContent(for kind: DashboardWidgetKind, settings: DashboardSettings) -> DashboardWidgetContent {
+        switch kind {
         case .quickNote:
             let note = settings.quickNote.trimmingCharacters(in: .whitespacesAndNewlines)
             return note.isEmpty ? .unavailable(reason: "Add a QuickNote in settings") : .quickNote(note)
+
         case .stocks:
+            if settings.stockSymbols.isEmpty {
+                return .unavailable(reason: "Add stock symbols in settings")
+            }
             return .unavailable(reason: "Stocks not configured")
+
         case .news:
-            return .unavailable(reason: "News not configured")
+            if let headline = dataCoordinator.cache.newsHeadline {
+                return .news(source: headline.source, headline: headline.title)
+            }
+            return .unavailable(reason: dataCoordinator.cache.newsError ?? "News unavailable")
+
         case .map:
             return .unavailable(reason: "Map not configured")
+
+        case .transit:
+            guard settings.transitEnabled else {
+                return .unavailable(reason: "Enable Transit in settings")
+            }
+            if let transit = dataCoordinator.cache.transit {
+                return .transit(station: transit.stationName, rows: transit.rows)
+            }
+            return .unavailable(reason: dataCoordinator.cache.transitError ?? "Transit unavailable")
         }
     }
 
@@ -141,6 +260,61 @@ final class DashboardViewModel: ObservableObject {
         }
         cachedFrame = rendered.frame
         previewImage = rendered.image
+    }
+
+    // MARK: - Paging
+
+    private func clampPageIndex(for settings: DashboardSettings) {
+        let count = max(1, settings.selectedWidgets.count)
+        if pageIndex >= count {
+            pageIndex = 0
+        }
+    }
+
+    private func paginate(delta: Int, wrap: Bool = false) {
+        let settings = settingsStore.settings
+        let widgets = widgetContents(for: settings)
+        guard widgets.count > 1 else { return }
+
+        let next = pageIndex + delta
+        if widgets.indices.contains(next) {
+            pageIndex = next
+        } else if wrap {
+            pageIndex = delta > 0 ? 0 : widgets.count - 1
+        } else {
+            return
+        }
+
+        refreshSnapshot()
+        if isDashboardDisplayed {
+            Task { _ = await sendCachedFrame(caller: "paginate") }
+        }
+    }
+
+    private func updateAutoRotateTask(isDisplayed: Bool) {
+        autoRotateTask?.cancel()
+        autoRotateTask = nil
+
+        let settings = settingsStore.settings
+        guard isDisplayed,
+              settings.isEnabled,
+              settings.widgetDisplayMode == .autoRotate,
+              settings.selectedWidgets.count > 1 else {
+            return
+        }
+
+        let interval = max(3, settings.autoRotateSeconds)
+        autoRotateTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(Int64(clamping: interval)))
+                } catch {
+                    break
+                }
+                guard let self, !Task.isCancelled else { return }
+                self.paginate(delta: 1, wrap: true)
+            }
+        }
     }
 
     // MARK: - Glasses events
@@ -164,7 +338,10 @@ final class DashboardViewModel: ObservableObject {
             guard stockLayerCleared else { return }
 
             refreshSnapshot(referenceDate: now)
+            isDashboardDisplayed = true
+            updateAutoRotateTask(isDisplayed: true)
             _ = await sendCachedFrame(caller: "headUp")
+            refreshDataAndResendIfChanged()
 
         case .headDown:
             let now = Date()
@@ -178,17 +355,48 @@ final class DashboardViewModel: ObservableObject {
                 return
             }
             lastHeadDownAt = now
+            isDashboardDisplayed = false
+            updateAutoRotateTask(isDisplayed: false)
             _ = await bluetoothManager?.clearDisplayAwaitingCompletion()
+
+        case .swipeForward:
+            guard settingsStore.settings.widgetDisplayMode == .paged else { return }
+            paginate(delta: 1)
+
+        case .swipeBackward:
+            guard settingsStore.settings.widgetDisplayMode == .paged else { return }
+            paginate(delta: -1)
 
         default:
             return
         }
     }
 
+    /// Whether swipe paging should be handled by the dashboard instead of transit.
+    func shouldHandleSwipePaging(
+        navigationSessionState: G1NavigationSessionState,
+        isNotificationMirrorEligible: Bool,
+        isTransitWidgetActive: Bool
+    ) -> Bool {
+        guard settingsStore.settings.isEnabled,
+              settingsStore.settings.widgetDisplayMode == .paged,
+              settingsStore.settings.selectedWidgets.count > 1 else {
+            return false
+        }
+
+        let owner = G1LensSurfaceArbiter.headGestureOwner(
+            navigationSessionState: navigationSessionState,
+            isNotificationMirrorEligible: isNotificationMirrorEligible,
+            isTransitWidgetActive: isTransitWidgetActive
+        )
+        return owner == .dashboardFallback
+    }
+
     /// Manually push the current dashboard to the glasses (used by the config
     /// screen's send button and by the feasibility spike).
     func sendNow() async {
         guard ownershipAvailable() else { return }
+        await refreshData()
         _ = await sendCachedFrame(caller: "sendNow")
     }
 

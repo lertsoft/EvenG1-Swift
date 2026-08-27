@@ -38,6 +38,8 @@
 	<string>EvenG1 shows your next event on the glasses dashboard.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>EvenG1 shows your upcoming reminders count on the glasses dashboard.</string>
+	<key>NSWeatherKitUsageDescription</key>
+	<string>EvenG1 shows current temperature on the glasses dashboard.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>EvenG1 uses your location to plan routes, provide live navigation directions, and find nearby transit.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

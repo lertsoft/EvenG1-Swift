@@ -66,11 +66,11 @@ struct DashboardBitmapRenderer: Sendable {
             }
 
             if let widgetRect = zones.widget {
-                drawWidget(in: widgetRect, content: snapshot.widget, redact: settings.redactSensitiveContent)
+                drawWidgetPanel(in: widgetRect, snapshot: snapshot, redact: settings.redactSensitiveContent)
             }
 
             if let indicatorRect = zones.pageIndicator {
-                draw("1/1", in: indicatorRect, font: Self.smallFont, alignment: .right)
+                drawPageIndicator(in: indicatorRect, snapshot: snapshot)
             }
         }
     }
@@ -117,6 +117,70 @@ struct DashboardBitmapRenderer: Sendable {
         draw(Self.eventTimeRange(event), at: CGPoint(x: rect.minX, y: rect.minY + 16), font: Self.smallFont)
     }
 
+    private func drawWidgetPanel(in rect: CGRect, snapshot: DashboardSnapshot, redact: Bool) {
+        let widgets = snapshot.widgets
+        guard !widgets.isEmpty else {
+            draw("No widgets selected", in: rect, font: Self.smallFont, alignment: .left)
+            return
+        }
+
+        switch snapshot.displayMode {
+        case .stacked:
+            drawStackedWidgets(widgets, in: rect, redact: redact)
+        case .paged, .autoRotate:
+            let index = min(max(0, snapshot.pageIndex), widgets.count - 1)
+            drawWidget(in: rect, content: widgets[index], redact: redact)
+        }
+    }
+
+    private func drawStackedWidgets(_ widgets: [DashboardWidgetContent], in rect: CGRect, redact: Bool) {
+        let count = CGFloat(widgets.count)
+        let slotHeight = rect.height / count
+        for (index, widget) in widgets.enumerated() {
+            let slot = CGRect(
+                x: rect.minX,
+                y: rect.minY + CGFloat(index) * slotHeight,
+                width: rect.width,
+                height: slotHeight
+            )
+            drawCompactWidget(in: slot, content: widget, redact: redact)
+        }
+    }
+
+    private func drawCompactWidget(in rect: CGRect, content: DashboardWidgetContent, redact: Bool) {
+        let label = content.kindLabel
+        draw(label, at: CGPoint(x: rect.minX, y: rect.minY), font: Self.tinyFont)
+
+        let bodyMinY = min(rect.maxY, rect.minY + 12)
+        let bodyRect = CGRect(
+            x: rect.minX,
+            y: bodyMinY,
+            width: rect.width,
+            height: max(0, rect.maxY - bodyMinY)
+        )
+        switch content {
+        case .quickNote(let text):
+            draw(Self.truncate(redact ? "QuickNote" : text, max: 28), in: bodyRect, font: Self.tinyFont, alignment: .left)
+
+        case .news(let source, let headline):
+            draw("\(source): \(Self.truncate(headline, max: 22))", in: bodyRect, font: Self.tinyFont, alignment: .left)
+
+        case .stocks(let quotes):
+            let line = quotes.prefix(2).map { "\($0.symbol) \(String(format: "%.1f", $0.changePercent))%" }.joined(separator: "  ")
+            draw(line.isEmpty ? "Stocks unavailable" : line, in: bodyRect, font: Self.tinyFont, alignment: .left)
+
+        case .map:
+            draw("Map unavailable", in: bodyRect, font: Self.tinyFont, alignment: .left)
+
+        case .transit(let station, let rows):
+            let summary = rows.prefix(2).map { "\($0.routeID)\($0.direction) \($0.minutesAway)m" }.joined(separator: "  ")
+            draw("\(Self.truncate(station, max: 12)) \(summary)", in: bodyRect, font: Self.tinyFont, alignment: .left)
+
+        case .unavailable(let reason):
+            draw(Self.truncate(reason, max: 32), in: bodyRect, font: Self.tinyFont, alignment: .left)
+        }
+    }
+
     private func drawWidget(in rect: CGRect, content: DashboardWidgetContent, redact: Bool) {
         switch content {
         case .quickNote(let text):
@@ -136,9 +200,30 @@ struct DashboardBitmapRenderer: Sendable {
         case .map:
             draw("Map unavailable", in: rect, font: Self.bodyFont, alignment: .left)
 
+        case .transit(let station, let rows):
+            draw(Self.truncate(station, max: 28), at: CGPoint(x: rect.minX, y: rect.minY), font: Self.smallFont)
+            for (index, row) in rows.prefix(4).enumerated() {
+                let minutes = row.minutesAway <= 0 ? "Now" : "\(row.minutesAway)m"
+                let line = "\(row.routeID) \(row.direction)  \(minutes)"
+                draw(line, at: CGPoint(x: rect.minX, y: rect.minY + 18 + CGFloat(index) * 16), font: Self.bodyFont)
+            }
+            if rows.isEmpty {
+                draw("No arrivals", at: CGPoint(x: rect.minX, y: rect.minY + 18), font: Self.bodyFont)
+            }
+
         case .unavailable(let reason):
             draw(reason, in: rect, font: Self.smallFont, alignment: .left)
         }
+    }
+
+    private func drawPageIndicator(in rect: CGRect, snapshot: DashboardSnapshot) {
+        let total = snapshot.widgets.count
+        guard total > 1, snapshot.displayMode != .stacked else {
+            draw("", in: rect, font: Self.smallFont, alignment: .right)
+            return
+        }
+        let current = min(max(0, snapshot.pageIndex), total - 1) + 1
+        draw("\(current)/\(total)", in: rect, font: Self.smallFont, alignment: .right)
     }
 
     private func drawDivider(atX x: CGFloat) {
@@ -157,6 +242,7 @@ struct DashboardBitmapRenderer: Sendable {
     private static let subtitleFont = UIFont.monospacedSystemFont(ofSize: 16, weight: .regular)
     private static let bodyFont = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
     private static let smallFont = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    private static let tinyFont = UIFont.monospacedSystemFont(ofSize: 10, weight: .regular)
 
     private func attributes(for font: UIFont) -> [NSAttributedString.Key: Any] {
         [.font: font, .foregroundColor: UIColor.white]

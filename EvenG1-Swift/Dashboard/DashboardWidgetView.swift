@@ -10,6 +10,8 @@ struct DashboardWidgetView: View {
     @ObservedObject private var settingsStore: DashboardSettingsStore
 
     @State private var isSending = false
+    @StateObject private var stationPickerViewModel = MTAStationPickerViewModel()
+    @State private var isStationPickerPresented = false
 
     init(viewModel: DashboardViewModel) {
         _viewModel = ObservedObject(wrappedValue: viewModel)
@@ -30,14 +32,32 @@ struct DashboardWidgetView: View {
             enableSection
             layoutSection
             widgetSelectionSection
+            widgetOrderSection
+            widgetDisplaySection
             widgetSettingsSection
             statusSettingsSection
         }
         .navigationTitle("Dashboard")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                EditButton()
+            }
+        }
         .onAppear {
             viewModel.bind(bluetoothManager: bluetoothManager)
-            viewModel.refreshSnapshot()
+            Task { await viewModel.refreshData() }
+        }
+        .sheet(isPresented: $isStationPickerPresented) {
+            MTAStationPickerSheet(
+                title: "Pin Transit Station",
+                pickerViewModel: stationPickerViewModel,
+                userCoordinate: nil,
+                onSelect: { station in
+                    viewModel.stationLockStore.setLock(station: station)
+                    Task { await viewModel.refreshData() }
+                }
+            )
         }
     }
 
@@ -58,7 +78,7 @@ struct DashboardWidgetView: View {
             } label: {
                 HStack {
                     Label("Send to glasses", systemImage: "paperplane")
-                    if isSending {
+                    if isSending || viewModel.isRefreshingData {
                         Spacer()
                         ProgressView()
                     }
@@ -66,11 +86,20 @@ struct DashboardWidgetView: View {
             }
             .disabled(isDisconnected || isSending)
             .accessibilityIdentifier("dashboard.sendButton")
+
+            Button {
+                Task { await viewModel.refreshData() }
+            } label: {
+                Label("Refresh data", systemImage: "arrow.clockwise")
+            }
+            .disabled(viewModel.isRefreshingData)
         } header: {
             Text("Preview")
         } footer: {
             if isDisconnected {
                 Text("Connect glasses to send. The preview shows exactly what the lens will display.")
+            } else {
+                Text("Refresh pulls calendar, weather, news, and transit into the preview.")
             }
         }
     }
@@ -97,17 +126,55 @@ struct DashboardWidgetView: View {
     }
 
     private var widgetSelectionSection: some View {
-        Section("Widget Selection") {
-            Picker("Widget", selection: settings.selectedWidget) {
-                ForEach(DashboardWidgetKind.allCases, id: \.self) { kind in
-                    Text(kind.displayName).tag(kind)
+        Section {
+            ForEach(DashboardWidgetKind.allCases, id: \.self) { kind in
+                Toggle(kind.displayName, isOn: widgetEnabledBinding(for: kind))
+                    .accessibilityIdentifier("dashboard.widget.\(kind.rawValue)")
+            }
+        } header: {
+            Text("Widget Selection")
+        } footer: {
+            Text("Enable one or more widgets for the dashboard panel.")
+        }
+    }
+
+    @ViewBuilder
+    private var widgetOrderSection: some View {
+        if settings.selectedWidgets.wrappedValue.count > 1 {
+            Section {
+                ForEach(settings.selectedWidgets.wrappedValue, id: \.self) { kind in
+                    Text(kind.displayName)
+                }
+                .onMove(perform: moveWidget)
+            } header: {
+                Text("Widget Order")
+            } footer: {
+                Text("Drag to reorder. Order applies to swipe, rotate, and stacked layouts.")
+            }
+        }
+    }
+
+    private var widgetDisplaySection: some View {
+        Section("Display Mode") {
+            Picker("Mode", selection: settings.widgetDisplayMode) {
+                ForEach(DashboardWidgetDisplayMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
                 }
             }
-            .pickerStyle(.menu)
-            .accessibilityIdentifier("dashboard.widgetPicker")
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("dashboard.displayModePicker")
 
-            if !settings.selectedWidget.wrappedValue.isAvailableOffline {
-                Label("This widget's data source is not connected yet.", systemImage: "exclamationmark.triangle")
+            if settings.widgetDisplayMode.wrappedValue == .autoRotate {
+                Stepper(
+                    "Rotate every \(settings.autoRotateSeconds.wrappedValue)s",
+                    value: settings.autoRotateSeconds,
+                    in: 3...60
+                )
+            }
+
+            if settings.widgetDisplayMode.wrappedValue == .paged,
+               settings.selectedWidgets.wrappedValue.count > 1 {
+                Label("Swipe the stem to page between widgets on the glasses.", systemImage: "hand.draw")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -131,6 +198,18 @@ struct DashboardWidgetView: View {
             NavigationLink("Weather") {
                 WeatherSettingsView(enabled: settings.weatherEnabled)
             }
+            NavigationLink("Transit") {
+                TransitDashboardSettingsView(
+                    enabled: settings.transitEnabled,
+                    horizonMinutes: settings.transitHorizonMinutes,
+                    stationLockStore: viewModel.stationLockStore,
+                    onPinStation: { isStationPickerPresented = true },
+                    onUseNearest: {
+                        viewModel.stationLockStore.clearLock()
+                        Task { await viewModel.refreshData() }
+                    }
+                )
+            }
         }
     }
 
@@ -148,6 +227,34 @@ struct DashboardWidgetView: View {
             }
             Toggle("Redact sensitive content", isOn: settings.redactSensitiveContent)
         }
+    }
+
+    // MARK: - Widget selection helpers
+
+    private func widgetEnabledBinding(for kind: DashboardWidgetKind) -> Binding<Bool> {
+        Binding(
+            get: { settingsStore.settings.selectedWidgets.contains(kind) },
+            set: { enabled in
+                var widgets = settingsStore.settings.selectedWidgets
+                if enabled {
+                    if !widgets.contains(kind) {
+                        widgets.append(kind)
+                    }
+                } else {
+                    widgets.removeAll { $0 == kind }
+                }
+                if widgets.isEmpty {
+                    widgets = [.quickNote]
+                }
+                settingsStore.settings.selectedWidgets = widgets
+            }
+        )
+    }
+
+    private func moveWidget(from source: IndexSet, to destination: Int) {
+        var widgets = settingsStore.settings.selectedWidgets
+        widgets.move(fromOffsets: source, toOffset: destination)
+        settingsStore.settings.selectedWidgets = widgets
     }
 }
 
@@ -261,7 +368,7 @@ private struct NewsSettingsView: View {
             } header: {
                 Text("RSS Feed")
             } footer: {
-                Text("News rendering is disabled until a feed's terms and attribution are validated.")
+                Text("Enter a public RSS or Atom feed URL. The top headline appears in the widget panel.")
             }
         }
         .navigationTitle("News")
@@ -281,6 +388,48 @@ private struct WeatherSettingsView: View {
             }
         }
         .navigationTitle("Weather")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct TransitDashboardSettingsView: View {
+    @Binding var enabled: Bool
+    @Binding var horizonMinutes: Int
+    @ObservedObject var stationLockStore: MTAManualStationLockStore
+    let onPinStation: () -> Void
+    let onUseNearest: () -> Void
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Show nearest arrivals", isOn: $enabled)
+                Stepper("Look ahead \(horizonMinutes) min", value: $horizonMinutes, in: 5...60, step: 5)
+            } footer: {
+                Text("Uses the NYC MTA subway realtime feed and your location to find nearby stations.")
+            }
+
+            Section("Station") {
+                if let lockedStation = stationLockStore.lockedStation {
+                    LabeledContent("Pinned", value: lockedStation.stationName)
+                } else {
+                    LabeledContent("Mode", value: "Nearest station")
+                }
+
+                Button {
+                    onPinStation()
+                } label: {
+                    Label("Pin a station", systemImage: "pin")
+                }
+
+                Button {
+                    onUseNearest()
+                } label: {
+                    Label("Use nearest", systemImage: "location")
+                }
+                .disabled(stationLockStore.lockedStation == nil)
+            }
+        }
+        .navigationTitle("Transit")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

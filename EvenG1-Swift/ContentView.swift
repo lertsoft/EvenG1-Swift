@@ -255,7 +255,20 @@ struct ContentView: View {
 
         Task {
             let consumed = await voiceCoordinator.handleGlassesEvent(event)
-            if !consumed {
+            if consumed { return }
+
+            let dashboardOwnsSwipes = dashboardViewModel.shouldHandleSwipePaging(
+                navigationSessionState: bluetoothManager.navigationSessionState,
+                isNotificationMirrorEligible: notificationMirror.isEligibleForHeadGestures,
+                isTransitWidgetActive: transitViewModel.isWidgetActive
+            )
+            switch DashboardGestureRouting.destination(
+                for: event,
+                dashboardOwnsSwipes: dashboardOwnsSwipes
+            ) {
+            case .dashboard:
+                await dashboardViewModel.handleGlassesEvent(event)
+            case .transit:
                 await transitViewModel.handleGlassesEvent(event)
             }
         }
